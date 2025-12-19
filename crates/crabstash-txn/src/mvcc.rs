@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use crabstash_common::Result;
-use crabstash_storage::Lsm;
+use crabstash_storage::{Lsm, LsmIterator};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,5 +83,9 @@ impl MvccEngine {
 
     pub fn storage(&self) -> &Arc<Lsm> {
         &self.storage
+    }
+
+    pub fn scan(&self) -> Result<LsmIterator> {
+        self.storage.scan()
     }
 }

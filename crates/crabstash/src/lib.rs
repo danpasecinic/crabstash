@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crabstash_common::Result;
 use crabstash_storage::{Lsm, LsmOptions};
-use crabstash_txn::{MvccEngine, Transaction, IsolationLevel};
+use crabstash_txn::{LsmIterator, MvccEngine, Transaction, IsolationLevel};
 use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
@@ -84,6 +84,11 @@ impl Db {
     pub fn sync(&self) -> Result<()> {
         self.engine.storage().sync()
     }
+
+    pub fn scan(&self) -> Result<DbIterator> {
+        let inner = self.engine.scan()?;
+        Ok(DbIterator { inner })
+    }
 }
 
 pub struct Txn<'a> {
@@ -111,6 +116,47 @@ impl<'a> Txn<'a> {
 
     pub fn abort(self) {
         self.engine.abort(&self.inner);
+    }
+}
+
+pub struct DbIterator {
+    inner: LsmIterator,
+}
+
+impl DbIterator {
+    pub fn key(&self) -> Option<&[u8]> {
+        self.inner.key()
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.inner.value().map(|b| b.as_ref())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.inner.is_valid()
+    }
+
+    pub fn next(&mut self) -> Result<()> {
+        self.inner.next()
+    }
+}
+
+impl Iterator for DbIterator {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.inner.is_valid() {
+            return None;
+        }
+
+        let key = self.inner.key()?.to_vec();
+        let value = self.inner.value()?.to_vec();
+
+        if let Err(e) = self.inner.next() {
+            return Some(Err(e));
+        }
+
+        Some(Ok((key, value)))
     }
 }
 
