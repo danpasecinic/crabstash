@@ -28,20 +28,20 @@ impl Compactor {
     }
 
     pub fn pick_compaction(&self, manifest: &Manifest) -> Option<CompactionTask> {
-        if let Some(level0) = manifest.levels.get(&0) {
-            if level0.sst_ids.len() >= LEVEL0_COMPACTION_TRIGGER {
-                let mut input_ssts = level0.sst_ids.clone();
+        if let Some(level0) = manifest.levels.get(&0)
+            && level0.sst_ids.len() >= LEVEL0_COMPACTION_TRIGGER
+        {
+            let mut input_ssts = level0.sst_ids.clone();
 
-                if let Some(level1) = manifest.levels.get(&1) {
-                    input_ssts.extend(level1.sst_ids.iter().copied());
-                }
-
-                return Some(CompactionTask {
-                    level: 0,
-                    input_ssts,
-                    output_level: 1,
-                });
+            if let Some(level1) = manifest.levels.get(&1) {
+                input_ssts.extend(level1.sst_ids.iter().copied());
             }
+
+            return Some(CompactionTask {
+                level: 0,
+                input_ssts,
+                output_level: 1,
+            });
         }
 
         for level in 1..6 {
@@ -59,10 +59,10 @@ impl Compactor {
                         if let Ok(sst) = input_sst {
                             for &next_id in &next_level.sst_ids {
                                 let next_path = self.dir.join(format!("{:06}.sst", next_id));
-                                if let Ok(next_sst) = SSTable::open(next_id, next_path) {
-                                    if Self::ranges_overlap(&sst, &next_sst) {
-                                        input_ssts.push(next_id);
-                                    }
+                                if let Ok(next_sst) = SSTable::open(next_id, next_path)
+                                    && Self::ranges_overlap(&sst, &next_sst)
+                                {
+                                    input_ssts.push(next_id);
                                 }
                             }
                         }
