@@ -6,11 +6,13 @@ use crate::sstable::{SSTable, SSTableBuilder, SSTableIterator};
 use crate::wal::{RecordType, Wal, WalRecord};
 use bytes::Bytes;
 use crabstash_common::{Key, Result};
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 pub struct LsmOptions {
     pub memtable_size: usize,
@@ -34,8 +36,12 @@ struct LsmInner {
     levels: HashMap<u32, Vec<SSTable>>,
     wal: Wal,
     manifest: Manifest,
-    #[allow(dead_code)]
-    compactor: Compactor,
+}
+
+struct CompactionState {
+    shutdown: AtomicBool,
+    work_available: Mutex<bool>,
+    condvar: Condvar,
 }
 
 pub struct Lsm {
@@ -43,6 +49,8 @@ pub struct Lsm {
     dir: PathBuf,
     options: LsmOptions,
     next_ts: AtomicU64,
+    compaction_state: Arc<CompactionState>,
+    compaction_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Lsm {
@@ -92,23 +100,83 @@ impl Lsm {
             }
         }
 
-        let compactor = Compactor::new(&dir);
-
         let inner = LsmInner {
             memtable,
             immutable_memtables: Vec::new(),
             levels,
             wal,
             manifest,
-            compactor,
         };
 
-        Ok(Self {
+        let compaction_state = Arc::new(CompactionState {
+            shutdown: AtomicBool::new(false),
+            work_available: Mutex::new(false),
+            condvar: Condvar::new(),
+        });
+
+        let lsm = Self {
             inner: RwLock::new(inner),
-            dir,
+            dir: dir.clone(),
             options,
             next_ts: AtomicU64::new(1),
-        })
+            compaction_state: compaction_state.clone(),
+            compaction_thread: Mutex::new(None),
+        };
+
+        let compactor = Compactor::new(&dir);
+
+        let state = compaction_state;
+        let compaction_dir = dir;
+        let handle = thread::spawn(move || {
+            Self::compaction_loop(state, compactor, compaction_dir);
+        });
+
+        *lsm.compaction_thread.lock() = Some(handle);
+
+        Ok(lsm)
+    }
+
+    fn compaction_loop(state: Arc<CompactionState>, compactor: Compactor, dir: PathBuf) {
+        loop {
+            let mut work = state.work_available.lock();
+            let result = state
+                .condvar
+                .wait_for(&mut work, Duration::from_millis(1000));
+
+            if state.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            if result.timed_out() && !*work {
+                continue;
+            }
+
+            *work = false;
+            drop(work);
+
+            let manifest_path = dir.join("MANIFEST");
+            let manifest = match crate::manifest::Manifest::open(&manifest_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if let Some(task) = compactor.pick_compaction(&manifest) {
+                let mut manifest = match crate::manifest::Manifest::open(&manifest_path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                if let Err(e) = compactor.compact(&task, &mut manifest) {
+                    eprintln!("Compaction error: {:?}", e);
+                }
+            }
+        }
+    }
+
+    fn notify_compaction(&self) {
+        let mut work = self.compaction_state.work_available.lock();
+        *work = true;
+        self.compaction_state.condvar.notify_one();
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
@@ -220,6 +288,8 @@ impl Lsm {
 
         inner.immutable_memtables.retain(|m| !Arc::ptr_eq(m, &imm));
 
+        self.notify_compaction();
+
         Ok(())
     }
 
@@ -269,6 +339,19 @@ impl Lsm {
         let full_iter = TwoMergeIterator::new(mem_merge, sst_merge);
 
         Ok(LsmIterator { inner: full_iter })
+    }
+}
+
+impl Drop for Lsm {
+    fn drop(&mut self) {
+        self.compaction_state
+            .shutdown
+            .store(true, Ordering::Relaxed);
+        self.compaction_state.condvar.notify_one();
+
+        if let Some(handle) = self.compaction_thread.lock().take() {
+            let _ = handle.join();
+        }
     }
 }
 
