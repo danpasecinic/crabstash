@@ -1,7 +1,10 @@
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
-use crabstash_common::Key;
+use crabstash_common::{Key, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use crate::iterator::StorageIterator;
 
 pub struct MemTable {
     map: SkipMap<Key, Option<Bytes>>,
@@ -52,5 +55,42 @@ impl MemTable {
 impl Default for MemTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct MemTableIterator {
+    entries: Vec<(Key, Option<Bytes>)>,
+    index: usize,
+}
+
+impl MemTableIterator {
+    pub fn new(memtable: &MemTable) -> Self {
+        let entries: Vec<_> = memtable.map.iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        Self { entries, index: 0 }
+    }
+
+    pub fn from_arc(memtable: &Arc<MemTable>) -> Self {
+        Self::new(memtable.as_ref())
+    }
+}
+
+impl StorageIterator for MemTableIterator {
+    fn key(&self) -> &Key {
+        &self.entries[self.index].0
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.entries[self.index].1.as_ref()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.index < self.entries.len()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.index += 1;
+        Ok(())
     }
 }
