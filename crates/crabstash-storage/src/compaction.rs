@@ -1,43 +1,15 @@
-#![allow(dead_code)]
-
+use crate::iterator::StorageIterator;
 use crate::manifest::Manifest;
-use crate::sstable::{SSTable, SSTableBuilder};
-use bytes::Bytes;
-use crabstash_common::{Key, Result};
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::path::Path;
+use crate::sstable::{SSTable, SSTableBuilder, SSTableIterator};
+use crabstash_common::Result;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const LEVEL0_COMPACTION_TRIGGER: usize = 4;
 const LEVEL_SIZE_MULTIPLIER: u64 = 10;
 const BASE_LEVEL_SIZE: u64 = 10 * 1024 * 1024;
 
-struct MergeEntry {
-    key: Key,
-    value: Option<Bytes>,
-    sst_idx: usize,
-}
-
-impl Eq for MergeEntry {}
-
-impl PartialEq for MergeEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-    }
-}
-
-impl Ord for MergeEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.key.cmp(&self.key)
-    }
-}
-
-impl PartialOrd for MergeEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
+#[derive(Debug, Clone)]
 pub struct CompactionTask {
     pub level: u32,
     pub input_ssts: Vec<u64>,
@@ -45,7 +17,7 @@ pub struct CompactionTask {
 }
 
 pub struct Compactor {
-    dir: std::path::PathBuf,
+    dir: PathBuf,
 }
 
 impl Compactor {
@@ -56,25 +28,49 @@ impl Compactor {
     }
 
     pub fn pick_compaction(&self, manifest: &Manifest) -> Option<CompactionTask> {
-        if let Some(level0) = manifest.levels.get(&0)
-            && level0.sst_ids.len() >= LEVEL0_COMPACTION_TRIGGER
-        {
-            return Some(CompactionTask {
-                level: 0,
-                input_ssts: level0.sst_ids.clone(),
-                output_level: 1,
-            });
+        if let Some(level0) = manifest.levels.get(&0) {
+            if level0.sst_ids.len() >= LEVEL0_COMPACTION_TRIGGER {
+                let mut input_ssts = level0.sst_ids.clone();
+
+                if let Some(level1) = manifest.levels.get(&1) {
+                    input_ssts.extend(level1.sst_ids.iter().copied());
+                }
+
+                return Some(CompactionTask {
+                    level: 0,
+                    input_ssts,
+                    output_level: 1,
+                });
+            }
         }
 
-        for level in 1..7 {
+        for level in 1..6 {
             if let Some(level_meta) = manifest.levels.get(&level) {
                 let level_size: u64 = level_meta.sst_ids.len() as u64 * BASE_LEVEL_SIZE;
                 let max_size = BASE_LEVEL_SIZE * LEVEL_SIZE_MULTIPLIER.pow(level);
 
-                if level_size > max_size {
+                if level_size > max_size && !level_meta.sst_ids.is_empty() {
+                    let input_id = level_meta.sst_ids[0];
+                    let mut input_ssts = vec![input_id];
+
+                    if let Some(next_level) = manifest.levels.get(&(level + 1)) {
+                        let input_sst =
+                            SSTable::open(input_id, self.dir.join(format!("{:06}.sst", input_id)));
+                        if let Ok(sst) = input_sst {
+                            for &next_id in &next_level.sst_ids {
+                                let next_path = self.dir.join(format!("{:06}.sst", next_id));
+                                if let Ok(next_sst) = SSTable::open(next_id, next_path) {
+                                    if Self::ranges_overlap(&sst, &next_sst) {
+                                        input_ssts.push(next_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     return Some(CompactionTask {
                         level,
-                        input_ssts: vec![level_meta.sst_ids[0]],
+                        input_ssts,
                         output_level: level + 1,
                     });
                 }
@@ -84,40 +80,58 @@ impl Compactor {
         None
     }
 
+    fn ranges_overlap(a: &SSTable, b: &SSTable) -> bool {
+        !(a.max_key < b.min_key || b.max_key < a.min_key)
+    }
+
     pub fn compact(&self, task: &CompactionTask, manifest: &mut Manifest) -> Result<Vec<u64>> {
-        let ssts: Vec<SSTable> = task
-            .input_ssts
-            .iter()
-            .map(|&id| SSTable::open(id, self.dir.join(format!("{:06}.sst", id))))
-            .collect::<Result<_>>()?;
-
-        let new_sst_id = manifest.allocate_sst_id();
-        let total_keys: usize = ssts.iter().map(|_| 1000).sum();
-        let mut builder = SSTableBuilder::new(new_sst_id, &self.dir, total_keys)?;
-
-        let mut heap: BinaryHeap<MergeEntry> = BinaryHeap::new();
-        for (idx, sst) in ssts.iter().enumerate() {
-            // TODO: implement iterator for SSTable
-            let _ = idx;
-            let _ = sst;
+        if task.input_ssts.is_empty() {
+            return Ok(vec![]);
         }
 
-        while let Some(entry) = heap.pop() {
-            while heap
-                .peek()
-                .map(|e: &MergeEntry| e.key.data() == entry.key.data())
-                .unwrap_or(false)
-            {
-                heap.pop();
+        let mut iterators: Vec<SSTableIterator> = Vec::new();
+        for &id in &task.input_ssts {
+            let path = self.dir.join(format!("{:06}.sst", id));
+            let sst = Arc::new(SSTable::open(id, path)?);
+            iterators.push(SSTableIterator::new(sst)?);
+        }
+
+        let mut merged = MergedIterator::new(iterators);
+
+        let new_sst_id = manifest.allocate_sst_id();
+        let estimated_keys = task.input_ssts.len() * 1000;
+        let mut builder = SSTableBuilder::new(new_sst_id, &self.dir, estimated_keys)?;
+
+        let mut last_key: Option<Vec<u8>> = None;
+        while merged.is_valid() {
+            let key = merged.key().clone();
+            let value = merged.value().cloned();
+
+            let dominated = last_key
+                .as_ref()
+                .is_some_and(|lk| lk.as_slice() == key.data());
+
+            if !dominated {
+                builder.add(&key, value.as_ref())?;
+                last_key = Some(key.data().to_vec());
             }
 
-            builder.add(&entry.key, entry.value.as_ref())?;
+            merged.advance()?;
         }
 
         builder.finish()?;
 
         for &id in &task.input_ssts {
-            manifest.remove_sst(task.level, id)?;
+            let level = if manifest
+                .levels
+                .get(&task.level)
+                .is_some_and(|l| l.sst_ids.contains(&id))
+            {
+                task.level
+            } else {
+                task.output_level
+            };
+            manifest.remove_sst(level, id)?;
             let path = self.dir.join(format!("{:06}.sst", id));
             std::fs::remove_file(path).ok();
         }
@@ -125,5 +139,45 @@ impl Compactor {
         manifest.add_sst(task.output_level, new_sst_id)?;
 
         Ok(vec![new_sst_id])
+    }
+}
+
+struct MergedIterator {
+    iterators: Vec<SSTableIterator>,
+}
+
+impl MergedIterator {
+    fn new(iterators: Vec<SSTableIterator>) -> Self {
+        Self { iterators }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.iterators.iter().any(|it| it.is_valid())
+    }
+
+    fn current_idx(&self) -> Option<usize> {
+        self.iterators
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.is_valid())
+            .min_by(|(_, a), (_, b)| a.key().cmp(b.key()))
+            .map(|(idx, _)| idx)
+    }
+
+    fn key(&self) -> &crabstash_common::Key {
+        let idx = self.current_idx().unwrap();
+        self.iterators[idx].key()
+    }
+
+    fn value(&self) -> Option<&bytes::Bytes> {
+        let idx = self.current_idx().unwrap();
+        self.iterators[idx].value()
+    }
+
+    fn advance(&mut self) -> Result<()> {
+        if let Some(idx) = self.current_idx() {
+            self.iterators[idx].next()?;
+        }
+        Ok(())
     }
 }
