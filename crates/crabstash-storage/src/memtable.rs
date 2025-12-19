@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use crabstash_common::{Key, Result};
 use crossbeam_skiplist::SkipMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::iterator::StorageIterator;
 

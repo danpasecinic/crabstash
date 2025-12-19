@@ -107,7 +107,12 @@ impl TransactionManager {
         }
     }
 
-    pub fn begin(&self, id: u64, start_ts: u64, isolation: IsolationLevel) -> Arc<Mutex<Transaction>> {
+    pub fn begin(
+        &self,
+        id: u64,
+        start_ts: u64,
+        isolation: IsolationLevel,
+    ) -> Arc<Mutex<Transaction>> {
         let txn = Arc::new(Mutex::new(Transaction::new(id, start_ts, isolation)));
         self.active_txns.lock().insert(id, txn.clone());
         txn
@@ -142,12 +147,18 @@ impl TransactionManager {
             return Err(Error::TransactionAborted);
         }
 
-        let write_keys: HashSet<Bytes> = txn.write_set.puts.keys().cloned()
+        let write_keys: HashSet<Bytes> = txn
+            .write_set
+            .puts
+            .keys()
+            .cloned()
             .chain(txn.write_set.deletes.iter().cloned())
             .collect();
 
         let commit_ts = txn.commit_ts.ok_or(Error::TransactionAborted)?;
-        self.committed_txns.lock().push((commit_ts, txn.start_ts, write_keys));
+        self.committed_txns
+            .lock()
+            .push((commit_ts, txn.start_ts, write_keys));
 
         txn.state = TransactionState::Committed;
         self.active_txns.lock().remove(&txn.id);
