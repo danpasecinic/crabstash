@@ -1,0 +1,17 @@
+[package]
+name = "crabstash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A high-performance embedded database with LSM-tree storage and MVCC transactions"
+repository.workspace = true
+keywords = ["database", "storage", "lsm", "embedded", "key-value"]
+categories = ["database-implementations"]
+
+[dependencies]
+crabstash-common = { workspace = true }
+crabstash-storage = { workspace = true }
+crabstash-txn = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }

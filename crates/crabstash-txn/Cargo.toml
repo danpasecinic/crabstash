@@ -1,0 +1,12 @@
+[package]
+name = "crabstash-txn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crabstash-common = { workspace = true }
+crabstash-storage = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }

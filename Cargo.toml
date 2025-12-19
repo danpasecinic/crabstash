@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/crabstash",
+    "crates/crabstash-common",
+    "crates/crabstash-storage",
+    "crates/crabstash-txn",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/danpasecinic/crabstash"
+
+[workspace.dependencies]
+crabstash = { path = "crates/crabstash" }
+crabstash-common = { path = "crates/crabstash-common" }
+crabstash-storage = { path = "crates/crabstash-storage" }
+crabstash-txn = { path = "crates/crabstash-txn" }
+
+bytes = "1.9"
+crossbeam-skiplist = "0.1"
+parking_lot = "0.12"
+crc32fast = "1.4"
+thiserror = "2.0"
