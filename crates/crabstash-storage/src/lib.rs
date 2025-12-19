@@ -1,12 +1,14 @@
+mod bloom;
+mod compaction;
+pub mod iterator;
+mod lsm;
+mod manifest;
 mod memtable;
 mod sstable;
 mod wal;
-mod manifest;
-mod compaction;
-mod bloom;
-mod lsm;
 
-pub use lsm::{Lsm, LsmOptions};
-pub use memtable::MemTable;
-pub use sstable::{SSTable, SSTableBuilder};
+pub use iterator::{MergeIterator, StorageIterator, TwoMergeIterator};
+pub use lsm::{Lsm, LsmIterator, LsmOptions};
+pub use memtable::{MemTable, MemTableIterator};
+pub use sstable::{SSTable, SSTableBuilder, SSTableIterator};
 pub use wal::Wal;

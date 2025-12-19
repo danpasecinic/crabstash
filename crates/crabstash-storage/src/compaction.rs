@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use crate::sstable::{SSTable, SSTableBuilder};
 use crate::manifest::Manifest;
+use crate::sstable::{SSTable, SSTableBuilder};
 use bytes::Bytes;
 use crabstash_common::{Key, Result};
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::path::Path;
 
 const LEVEL0_COMPACTION_TRIGGER: usize = 4;
@@ -84,12 +84,9 @@ impl Compactor {
         None
     }
 
-    pub fn compact(
-        &self,
-        task: &CompactionTask,
-        manifest: &mut Manifest,
-    ) -> Result<Vec<u64>> {
-        let ssts: Vec<SSTable> = task.input_ssts
+    pub fn compact(&self, task: &CompactionTask, manifest: &mut Manifest) -> Result<Vec<u64>> {
+        let ssts: Vec<SSTable> = task
+            .input_ssts
             .iter()
             .map(|&id| SSTable::open(id, self.dir.join(format!("{:06}.sst", id))))
             .collect::<Result<_>>()?;
@@ -106,7 +103,11 @@ impl Compactor {
         }
 
         while let Some(entry) = heap.pop() {
-            while heap.peek().map(|e: &MergeEntry| e.key.data() == entry.key.data()).unwrap_or(false) {
+            while heap
+                .peek()
+                .map(|e: &MergeEntry| e.key.data() == entry.key.data())
+                .unwrap_or(false)
+            {
                 heap.pop();
             }
 

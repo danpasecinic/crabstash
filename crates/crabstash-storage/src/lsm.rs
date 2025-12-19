@@ -1,8 +1,9 @@
-use crate::memtable::MemTable;
-use crate::sstable::{SSTable, SSTableBuilder};
-use crate::wal::{Wal, WalRecord, RecordType};
-use crate::manifest::Manifest;
 use crate::compaction::Compactor;
+use crate::iterator::{MergeIterator, StorageIterator, TwoMergeIterator};
+use crate::manifest::Manifest;
+use crate::memtable::{MemTable, MemTableIterator};
+use crate::sstable::{SSTable, SSTableBuilder, SSTableIterator};
+use crate::wal::{RecordType, Wal, WalRecord};
 use bytes::Bytes;
 use crabstash_common::{Key, Result};
 use parking_lot::RwLock;
@@ -226,5 +227,82 @@ impl Lsm {
         let mut inner = self.inner.write();
         inner.wal.sync()?;
         Ok(())
+    }
+
+    pub fn scan(&self) -> Result<LsmIterator> {
+        let inner = self.inner.read();
+
+        let memtable_iter = MemTableIterator::new(&inner.memtable);
+
+        let mut imm_iters: Vec<MemTableIterator> = inner
+            .immutable_memtables
+            .iter()
+            .map(MemTableIterator::from_arc)
+            .collect();
+        imm_iters.reverse();
+
+        let imm_merge = MergeIterator::new(imm_iters);
+
+        let mem_merge = TwoMergeIterator::new(memtable_iter, imm_merge);
+
+        let mut l0_iters: Vec<SSTableIterator> = Vec::new();
+        if let Some(l0_ssts) = inner.levels.get(&0) {
+            for sst in l0_ssts.iter().rev() {
+                let sst_arc = Arc::new(SSTable::open(sst.id, sst.path())?);
+                l0_iters.push(SSTableIterator::new(sst_arc)?);
+            }
+        }
+        let l0_merge = MergeIterator::new(l0_iters);
+
+        let mut level_iters: Vec<SSTableIterator> = Vec::new();
+        for level in 1..7 {
+            if let Some(ssts) = inner.levels.get(&level) {
+                for sst in ssts {
+                    let sst_arc = Arc::new(SSTable::open(sst.id, sst.path())?);
+                    level_iters.push(SSTableIterator::new(sst_arc)?);
+                }
+            }
+        }
+        let levels_merge = MergeIterator::new(level_iters);
+
+        let sst_merge = TwoMergeIterator::new(l0_merge, levels_merge);
+        let full_iter = TwoMergeIterator::new(mem_merge, sst_merge);
+
+        Ok(LsmIterator { inner: full_iter })
+    }
+}
+
+type InnerLsmIterator = TwoMergeIterator<
+    TwoMergeIterator<MemTableIterator, MergeIterator<MemTableIterator>>,
+    TwoMergeIterator<MergeIterator<SSTableIterator>, MergeIterator<SSTableIterator>>,
+>;
+
+pub struct LsmIterator {
+    inner: InnerLsmIterator,
+}
+
+impl LsmIterator {
+    pub fn key(&self) -> Option<&[u8]> {
+        if self.is_valid() {
+            Some(self.inner.key().data())
+        } else {
+            None
+        }
+    }
+
+    pub fn value(&self) -> Option<&Bytes> {
+        if self.is_valid() {
+            self.inner.value()
+        } else {
+            None
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.inner.is_valid()
+    }
+
+    pub fn advance(&mut self) -> Result<()> {
+        self.inner.next()
     }
 }

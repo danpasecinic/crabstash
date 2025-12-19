@@ -3,8 +3,10 @@ use crabstash_common::{Error, Key, Result};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::bloom::BloomFilter;
+use crate::iterator::StorageIterator;
 
 const SSTABLE_MAGIC: u32 = 0x53535442;
 const BLOCK_SIZE: usize = 4096;
@@ -94,10 +96,12 @@ impl SSTable {
 
         let bloom = BloomFilter::from_bytes(bloom_bits, bloom_num_hashes);
 
-        let min_key = block_metas.first()
+        let min_key = block_metas
+            .first()
             .map(|b| b.first_key.clone())
             .unwrap_or_default();
-        let max_key = block_metas.last()
+        let max_key = block_metas
+            .last()
             .map(|b| b.last_key.clone())
             .unwrap_or_default();
 
@@ -171,6 +175,153 @@ impl SSTable {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn num_blocks(&self) -> usize {
+        self.block_metas.len()
+    }
+
+    pub fn block_meta(&self, idx: usize) -> &BlockMeta {
+        &self.block_metas[idx]
+    }
+}
+
+pub struct SSTableIterator {
+    table: Arc<SSTable>,
+    block_idx: usize,
+    block_data: Vec<u8>,
+    block_offset: usize,
+    current_key: Key,
+    current_value: Option<Bytes>,
+    valid: bool,
+}
+
+impl SSTableIterator {
+    pub fn new(table: Arc<SSTable>) -> Result<Self> {
+        let mut iter = Self {
+            table,
+            block_idx: 0,
+            block_data: Vec::new(),
+            block_offset: 0,
+            current_key: Key::new(Bytes::new(), 0),
+            current_value: None,
+            valid: false,
+        };
+        iter.load_block(0)?;
+        iter.parse_entry()?;
+        Ok(iter)
+    }
+
+    pub fn seek_to_first(&mut self) -> Result<()> {
+        self.block_idx = 0;
+        self.load_block(0)?;
+        self.parse_entry()
+    }
+
+    pub fn seek(&mut self, target: &[u8]) -> Result<()> {
+        let block_idx = self
+            .table
+            .block_metas
+            .binary_search_by(|meta| meta.first_key.as_ref().cmp(target))
+            .unwrap_or_else(|idx| idx.saturating_sub(1));
+
+        self.block_idx = block_idx;
+        self.load_block(block_idx)?;
+        self.parse_entry()?;
+
+        while self.valid && self.current_key.data() < target {
+            self.next()?;
+        }
+        Ok(())
+    }
+
+    fn load_block(&mut self, idx: usize) -> Result<()> {
+        if idx >= self.table.block_metas.len() {
+            self.valid = false;
+            return Ok(());
+        }
+
+        let meta = &self.table.block_metas[idx];
+        let mut file = File::open(&self.table.path)?;
+        file.seek(SeekFrom::Start(meta.offset))?;
+
+        self.block_data = vec![0u8; meta.length as usize];
+        file.read_exact(&mut self.block_data)?;
+
+        let checksum_start = self.block_data.len() - 4;
+        let expected = u32::from_le_bytes(self.block_data[checksum_start..].try_into().unwrap());
+        let actual = crc32fast::hash(&self.block_data[..checksum_start]);
+
+        if expected != actual {
+            return Err(Error::Corruption("Block checksum mismatch".into()));
+        }
+
+        self.block_data.truncate(checksum_start);
+        self.block_offset = 0;
+        self.block_idx = idx;
+        Ok(())
+    }
+
+    fn parse_entry(&mut self) -> Result<()> {
+        if self.block_offset >= self.block_data.len() {
+            if self.block_idx + 1 >= self.table.block_metas.len() {
+                self.valid = false;
+                return Ok(());
+            }
+            self.load_block(self.block_idx + 1)?;
+        }
+
+        if self.block_data.is_empty() {
+            self.valid = false;
+            return Ok(());
+        }
+
+        let mut buf = &self.block_data[self.block_offset..];
+        if !buf.has_remaining() {
+            self.valid = false;
+            return Ok(());
+        }
+
+        let key_len = buf.get_u32_le() as usize;
+        let key_data = Bytes::copy_from_slice(&buf[..key_len]);
+        buf.advance(key_len);
+
+        let value_len = buf.get_u32_le() as usize;
+        let is_tombstone = value_len == u32::MAX as usize;
+
+        let value = if is_tombstone {
+            None
+        } else {
+            let v = Bytes::copy_from_slice(&buf[..value_len]);
+            buf.advance(value_len);
+            Some(v)
+        };
+
+        let consumed = self.block_data.len() - self.block_offset - buf.len();
+        self.block_offset += consumed;
+
+        self.current_key = Key::new(key_data, 0);
+        self.current_value = value;
+        self.valid = true;
+        Ok(())
+    }
+}
+
+impl StorageIterator for SSTableIterator {
+    fn key(&self) -> &Key {
+        &self.current_key
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.current_value.as_ref()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.parse_entry()
     }
 }
 
@@ -258,7 +409,8 @@ impl SSTableBuilder {
 
     pub fn finish(mut self) -> Result<PathBuf> {
         if !self.current_block.is_empty() {
-            let last_key = self.block_metas
+            let last_key = self
+                .block_metas
                 .last()
                 .map(|m| m.last_key.clone())
                 .unwrap_or_default();
