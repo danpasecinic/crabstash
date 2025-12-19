@@ -9,8 +9,8 @@ use crabstash_common::{Key, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct LsmOptions {
     pub memtable_size: usize,
@@ -237,7 +237,7 @@ impl Lsm {
         let mut imm_iters: Vec<MemTableIterator> = inner
             .immutable_memtables
             .iter()
-            .map(|imm| MemTableIterator::from_arc(imm))
+            .map(MemTableIterator::from_arc)
             .collect();
         imm_iters.reverse();
 
@@ -302,7 +302,7 @@ impl LsmIterator {
         self.inner.is_valid()
     }
 
-    pub fn next(&mut self) -> Result<()> {
+    pub fn advance(&mut self) -> Result<()> {
         self.inner.next()
     }
 }

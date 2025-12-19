@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crabstash_common::Result;
 use crabstash_storage::{Lsm, LsmOptions};
-use crabstash_txn::{LsmIterator, MvccEngine, Transaction, IsolationLevel};
+use crabstash_txn::{IsolationLevel, LsmIterator, MvccEngine, Transaction};
 use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
@@ -136,8 +136,8 @@ impl DbIterator {
         self.inner.is_valid()
     }
 
-    pub fn next(&mut self) -> Result<()> {
-        self.inner.next()
+    pub fn advance(&mut self) -> Result<()> {
+        self.inner.advance()
     }
 }
 
@@ -152,7 +152,7 @@ impl Iterator for DbIterator {
         let key = self.inner.key()?.to_vec();
         let value = self.inner.value()?.to_vec();
 
-        if let Err(e) = self.inner.next() {
+        if let Err(e) = self.inner.advance() {
             return Some(Err(e));
         }
 
