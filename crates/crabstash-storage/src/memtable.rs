@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use crossbeam_skiplist::SkipMap;
 use crabstash_common::{Key, Result};
+use crossbeam_skiplist::SkipMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -40,7 +40,9 @@ impl MemTable {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Key, Option<Bytes>)> + '_ {
-        self.map.iter().map(|entry| (entry.key().clone(), entry.value().clone()))
+        self.map
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -65,7 +67,9 @@ pub struct MemTableIterator {
 
 impl MemTableIterator {
     pub fn new(memtable: &MemTable) -> Self {
-        let entries: Vec<_> = memtable.map.iter()
+        let entries: Vec<_> = memtable
+            .map
+            .iter()
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         Self { entries, index: 0 }
