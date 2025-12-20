@@ -17,11 +17,11 @@ pub enum RecordType {
 impl TryFrom<u8> for RecordType {
     type Error = Error;
 
-    fn try_from(value: u8) -> Result<Self> {
+    fn try_from(value: u8) -> std::result::Result<Self, Error> {
         match value {
             1 => Ok(RecordType::Put),
             2 => Ok(RecordType::Delete),
-            _ => Err(Error::Corruption(format!("Invalid record type: {}", value))),
+            _ => Err(Error::Corruption(format!("Invalid record type: {value}"))),
         }
     }
 }
@@ -111,7 +111,7 @@ impl Wal {
             reader.read_exact(&mut data)?;
 
             if crc32fast::hash(&data) != checksum {
-                return Err(Error::Corruption("WAL checksum mismatch".into()));
+                return Err(Error::Corruption("WAL checksum mismatch".into()).into());
             }
 
             let mut buf = &data[..];

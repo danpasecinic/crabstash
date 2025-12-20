@@ -38,7 +38,7 @@ impl SSTable {
         file.read_exact(&mut magic_buf)?;
         let magic = u32::from_le_bytes(magic_buf);
         if magic != SSTABLE_MAGIC {
-            return Err(Error::Corruption("Invalid SSTable magic".into()));
+            return Err(Error::Corruption("Invalid SSTable magic".into()).into());
         }
 
         file.seek(SeekFrom::End(-12))?;
@@ -140,7 +140,7 @@ impl SSTable {
         let actual_checksum = crc32fast::hash(&block[..checksum_start]);
 
         if expected_checksum != actual_checksum {
-            return Err(Error::Corruption("Block checksum mismatch".into()));
+            return Err(Error::Corruption("Block checksum mismatch".into()).into());
         }
 
         block.truncate(checksum_start);
@@ -253,7 +253,7 @@ impl SSTableIterator {
         let actual = crc32fast::hash(&self.block_data[..checksum_start]);
 
         if expected != actual {
-            return Err(Error::Corruption("Block checksum mismatch".into()));
+            return Err(Error::Corruption("Block checksum mismatch".into()).into());
         }
 
         self.block_data.truncate(checksum_start);

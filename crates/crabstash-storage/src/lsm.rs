@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tracing::{debug, info, instrument};
 
 pub struct LsmOptions {
     pub memtable_size: usize,
@@ -55,6 +56,7 @@ pub struct Lsm {
 }
 
 impl Lsm {
+    #[instrument(skip(options), fields(dir = %dir.as_ref().display()))]
     pub fn open(dir: impl AsRef<Path>, options: LsmOptions) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
@@ -180,6 +182,7 @@ impl Lsm {
         self.compaction_state.condvar.notify_one();
     }
 
+    #[instrument(skip(self, key), fields(key_len = key.len()))]
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let ts = self.next_ts.load(Ordering::Relaxed);
         let search_key = Key::new(Bytes::copy_from_slice(key), ts);
@@ -187,11 +190,13 @@ impl Lsm {
         let inner = self.inner.read();
 
         if let Some(value) = inner.memtable.get(&search_key) {
+            debug!("found in memtable");
             return Ok(value);
         }
 
         for imm in inner.immutable_memtables.iter().rev() {
             if let Some(value) = imm.get(&search_key) {
+                debug!("found in immutable memtable");
                 return Ok(value);
             }
         }
@@ -203,16 +208,23 @@ impl Lsm {
             if let Some(ssts) = inner.levels.get_mut(&level) {
                 for sst in ssts.iter_mut().rev() {
                     if let Some(value) = sst.get(key)? {
+                        debug!(level, "found in SSTable");
                         return Ok(Some(value));
                     }
                 }
             }
         }
 
+        debug!("key not found");
         Ok(None)
     }
 
-    pub fn put(&self, key: impl Into<Bytes>, value: impl Into<Bytes>) -> Result<()> {
+    #[instrument(skip(self, key, value), fields(key_len = key.as_ref().len(), value_len = value.as_ref().len()))]
+    pub fn put(
+        &self,
+        key: impl AsRef<[u8]> + Into<Bytes>,
+        value: impl AsRef<[u8]> + Into<Bytes>,
+    ) -> Result<()> {
         let key = key.into();
         let value = value.into();
         let ts = self.next_ts.fetch_add(1, Ordering::Relaxed);
@@ -231,13 +243,15 @@ impl Lsm {
         inner.memtable.put(key, value);
 
         if inner.memtable.size() >= self.options.memtable_size {
+            info!("memtable full, rotating");
             self.rotate_memtable(&mut inner)?;
         }
 
         Ok(())
     }
 
-    pub fn delete(&self, key: impl Into<Bytes>) -> Result<()> {
+    #[instrument(skip(self, key), fields(key_len = key.as_ref().len()))]
+    pub fn delete(&self, key: impl AsRef<[u8]> + Into<Bytes>) -> Result<()> {
         let key = key.into();
         let ts = self.next_ts.fetch_add(1, Ordering::Relaxed);
 
@@ -257,6 +271,7 @@ impl Lsm {
         Ok(())
     }
 
+    #[instrument(skip(self, inner))]
     fn rotate_memtable(&self, inner: &mut LsmInner) -> Result<()> {
         let old_memtable = std::mem::take(&mut inner.memtable);
         let imm = Arc::new(old_memtable);
@@ -273,6 +288,7 @@ impl Lsm {
         Ok(())
     }
 
+    #[instrument(skip(self, inner, imm), fields(entries = imm.len()))]
     fn flush_immutable(&self, inner: &mut LsmInner, imm: Arc<MemTable>) -> Result<()> {
         let sst_id = inner.manifest.allocate_sst_id();
         let mut builder = SSTableBuilder::new(sst_id, &self.dir, imm.len())?;

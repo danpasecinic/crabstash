@@ -133,7 +133,7 @@ impl TransactionManager {
             if *other_commit_ts > txn.start_ts && *other_start_ts < commit_ts {
                 for read_key in txn.read_set() {
                     if other_writes.contains(read_key) {
-                        return Err(Error::TransactionConflict);
+                        return Err(Error::TransactionConflict.into());
                     }
                 }
             }
@@ -144,7 +144,7 @@ impl TransactionManager {
 
     pub fn commit(&self, txn: &mut Transaction) -> Result<()> {
         if !txn.is_active() {
-            return Err(Error::TransactionAborted);
+            return Err(Error::TransactionAborted.into());
         }
 
         let write_keys: HashSet<Bytes> = txn

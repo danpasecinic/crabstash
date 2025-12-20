@@ -10,4 +10,4 @@ bytes = { workspace = true }
 crossbeam-skiplist = { workspace = true }
 parking_lot = { workspace = true }
 crc32fast = { workspace = true }
-thiserror = { workspace = true }
+tracing = { workspace = true }

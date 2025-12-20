@@ -4,6 +4,7 @@ use crate::sstable::{SSTable, SSTableBuilder, SSTableIterator};
 use crabstash_common::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::{info, instrument};
 
 const LEVEL0_COMPACTION_TRIGGER: usize = 4;
 const LEVEL_SIZE_MULTIPLIER: u64 = 10;
@@ -84,7 +85,9 @@ impl Compactor {
         !(a.max_key < b.min_key || b.max_key < a.min_key)
     }
 
+    #[instrument(skip(self, manifest), fields(level = task.level, output = task.output_level, inputs = task.input_ssts.len()))]
     pub fn compact(&self, task: &CompactionTask, manifest: &mut Manifest) -> Result<Vec<u64>> {
+        info!("starting compaction");
         if task.input_ssts.is_empty() {
             return Ok(vec![]);
         }
@@ -138,6 +141,7 @@ impl Compactor {
 
         manifest.add_sst(task.output_level, new_sst_id)?;
 
+        info!(new_sst_id, "compaction complete");
         Ok(vec![new_sst_id])
     }
 }

@@ -14,4 +14,3 @@ crabstash-storage = { workspace = true }
 crabstash-txn = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
-thiserror = { workspace = true }

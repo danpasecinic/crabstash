@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{debug, instrument};
 
 use crate::timestamp::TimestampOracle;
 use crate::transaction::{IsolationLevel, Transaction, TransactionManager};
@@ -30,9 +31,11 @@ impl MvccEngine {
         self.begin_with_isolation(IsolationLevel::Snapshot)
     }
 
+    #[instrument(skip(self))]
     pub fn begin_with_isolation(&self, isolation: IsolationLevel) -> Arc<Mutex<Transaction>> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::Relaxed);
         let start_ts = self.ts_oracle.get_timestamp();
+        debug!(txn_id, start_ts, "transaction started");
         self.txn_manager.begin(txn_id, start_ts, isolation)
     }
 
@@ -64,6 +67,7 @@ impl MvccEngine {
         txn_guard.write_set.delete(key.into());
     }
 
+    #[instrument(skip(self, txn))]
     pub fn commit(&self, txn: &Arc<Mutex<Transaction>>) -> Result<()> {
         let mut txn_guard = txn.lock();
         let commit_ts = self.ts_oracle.get_timestamp();
@@ -79,11 +83,14 @@ impl MvccEngine {
         }
 
         self.txn_manager.commit(&mut txn_guard)?;
+        debug!(commit_ts, "transaction committed");
         Ok(())
     }
 
+    #[instrument(skip(self, txn))]
     pub fn abort(&self, txn: &Arc<Mutex<Transaction>>) {
         let mut txn_guard = txn.lock();
+        debug!("transaction aborted");
         self.txn_manager.abort(&mut txn_guard);
     }
 
