@@ -3,6 +3,7 @@ use crabstash_common::Result;
 use crabstash_storage::{Lsm, LsmOptions};
 use crabstash_txn::{IsolationLevel, LsmIterator, MvccEngine, Transaction};
 use parking_lot::Mutex;
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -89,6 +90,35 @@ impl Db {
         let inner = self.engine.scan()?;
         Ok(DbIterator { inner })
     }
+
+    pub fn scan_range<K: AsRef<[u8]>>(
+        &self,
+        start: Bound<K>,
+        end: Bound<K>,
+    ) -> Result<DbIterator> {
+        let inner = self.engine.scan_range(start, end)?;
+        Ok(DbIterator { inner })
+    }
+
+    pub fn prefix_scan(&self, prefix: impl AsRef<[u8]>) -> Result<DbIterator> {
+        let prefix = prefix.as_ref();
+        let start = prefix.to_vec();
+        let end = prefix_end_bound(prefix);
+        let inner = self.engine.scan_range(Bound::Included(start), end)?;
+        Ok(DbIterator { inner })
+    }
+}
+
+fn prefix_end_bound(prefix: &[u8]) -> Bound<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    for i in (0..end.len()).rev() {
+        if end[i] < 0xff {
+            end[i] += 1;
+            end.truncate(i + 1);
+            return Bound::Excluded(end);
+        }
+    }
+    Bound::Unbounded
 }
 
 pub struct Txn<'a> {
