@@ -91,11 +91,7 @@ impl Db {
         Ok(DbIterator { inner })
     }
 
-    pub fn scan_range<K: AsRef<[u8]>>(
-        &self,
-        start: Bound<K>,
-        end: Bound<K>,
-    ) -> Result<DbIterator> {
+    pub fn scan_range<K: AsRef<[u8]>>(&self, start: Bound<K>, end: Bound<K>) -> Result<DbIterator> {
         let inner = self.engine.scan_range(start, end)?;
         Ok(DbIterator { inner })
     }
