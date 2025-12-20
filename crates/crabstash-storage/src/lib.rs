@@ -7,7 +7,7 @@ mod memtable;
 mod sstable;
 mod wal;
 
-pub use iterator::{MergeIterator, StorageIterator, TwoMergeIterator};
+pub use iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
 pub use lsm::{Lsm, LsmIterator, LsmOptions};
 pub use memtable::{MemTable, MemTableIterator};
 pub use sstable::{SSTable, SSTableBuilder, SSTableIterator};

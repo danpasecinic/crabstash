@@ -78,6 +78,17 @@ impl MemTableIterator {
     pub fn from_arc(memtable: &Arc<MemTable>) -> Self {
         Self::new(memtable.as_ref())
     }
+
+    pub fn seek(&mut self, target: &[u8]) {
+        self.index = self
+            .entries
+            .binary_search_by(|(key, _)| key.data().cmp(target))
+            .unwrap_or_else(|idx| idx);
+    }
+
+    pub fn seek_to_first(&mut self) {
+        self.index = 0;
+    }
 }
 
 impl StorageIterator for MemTableIterator {

@@ -2,6 +2,7 @@ use bytes::Bytes;
 use crabstash_common::{Key, Result};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::ops::Bound;
 
 pub struct Entry {
     pub key: Key,
@@ -154,6 +155,58 @@ impl<A: StorageIterator, B: StorageIterator> StorageIterator for TwoMergeIterato
             self.b.next()?;
         }
         self.use_a = Self::choose_a(&self.a, &self.b);
+        Ok(())
+    }
+}
+
+pub struct BoundedIterator<I: StorageIterator> {
+    inner: I,
+    end_bound: Bound<Bytes>,
+    valid: bool,
+}
+
+impl<I: StorageIterator> BoundedIterator<I> {
+    pub fn new(inner: I, end_bound: Bound<Bytes>) -> Self {
+        let mut iter = Self {
+            inner,
+            end_bound,
+            valid: true,
+        };
+        iter.check_bound();
+        iter
+    }
+
+    fn check_bound(&mut self) {
+        if !self.inner.is_valid() {
+            self.valid = false;
+            return;
+        }
+
+        let key = self.inner.key().data();
+        self.valid = match &self.end_bound {
+            Bound::Unbounded => true,
+            Bound::Included(end) => key <= end.as_ref(),
+            Bound::Excluded(end) => key < end.as_ref(),
+        };
+    }
+}
+
+impl<I: StorageIterator> StorageIterator for BoundedIterator<I> {
+    fn key(&self) -> &Key {
+        self.inner.key()
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.inner.value()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.valid && self.inner.is_valid()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.inner.next()?;
+        self.check_bound();
         Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use crate::compaction::Compactor;
-use crate::iterator::{MergeIterator, StorageIterator, TwoMergeIterator};
+use crate::iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
 use crate::manifest::Manifest;
 use crate::memtable::{MemTable, MemTableIterator};
 use crate::sstable::{SSTable, SSTableBuilder, SSTableIterator};
@@ -8,6 +8,7 @@ use bytes::Bytes;
 use crabstash_common::{Key, Result};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -300,26 +301,58 @@ impl Lsm {
     }
 
     pub fn scan(&self) -> Result<LsmIterator> {
+        self.scan_range::<&[u8]>(Bound::Unbounded, Bound::Unbounded)
+    }
+
+    pub fn scan_range<K: AsRef<[u8]>>(
+        &self,
+        start: Bound<K>,
+        end: Bound<K>,
+    ) -> Result<LsmIterator> {
         let inner = self.inner.read();
 
-        let memtable_iter = MemTableIterator::new(&inner.memtable);
+        let start_key = match &start {
+            Bound::Unbounded => None,
+            Bound::Included(k) => Some(k.as_ref()),
+            Bound::Excluded(k) => Some(k.as_ref()),
+        };
+
+        let end_bound = match end {
+            Bound::Unbounded => Bound::Unbounded,
+            Bound::Included(k) => Bound::Included(Bytes::copy_from_slice(k.as_ref())),
+            Bound::Excluded(k) => Bound::Excluded(Bytes::copy_from_slice(k.as_ref())),
+        };
+
+        let mut memtable_iter = MemTableIterator::new(&inner.memtable);
+        if let Some(key) = start_key {
+            memtable_iter.seek(key);
+        }
 
         let mut imm_iters: Vec<MemTableIterator> = inner
             .immutable_memtables
             .iter()
-            .map(MemTableIterator::from_arc)
+            .map(|m| {
+                let mut iter = MemTableIterator::from_arc(m);
+                if let Some(key) = start_key {
+                    iter.seek(key);
+                }
+                iter
+            })
             .collect();
         imm_iters.reverse();
 
         let imm_merge = MergeIterator::new(imm_iters);
-
         let mem_merge = TwoMergeIterator::new(memtable_iter, imm_merge);
 
         let mut l0_iters: Vec<SSTableIterator> = Vec::new();
         if let Some(l0_ssts) = inner.levels.get(&0) {
             for sst in l0_ssts.iter().rev() {
                 let sst_arc = Arc::new(SSTable::open(sst.id, sst.path())?);
-                l0_iters.push(SSTableIterator::new(sst_arc)?);
+                let mut iter = SSTableIterator::new(sst_arc)?;
+                if let Some(key) = start_key {
+                    iter.seek(key)?;
+                }
+                l0_iters.push(iter);
             }
         }
         let l0_merge = MergeIterator::new(l0_iters);
@@ -329,7 +362,11 @@ impl Lsm {
             if let Some(ssts) = inner.levels.get(&level) {
                 for sst in ssts {
                     let sst_arc = Arc::new(SSTable::open(sst.id, sst.path())?);
-                    level_iters.push(SSTableIterator::new(sst_arc)?);
+                    let mut iter = SSTableIterator::new(sst_arc)?;
+                    if let Some(key) = start_key {
+                        iter.seek(key)?;
+                    }
+                    level_iters.push(iter);
                 }
             }
         }
@@ -338,7 +375,16 @@ impl Lsm {
         let sst_merge = TwoMergeIterator::new(l0_merge, levels_merge);
         let full_iter = TwoMergeIterator::new(mem_merge, sst_merge);
 
-        Ok(LsmIterator { inner: full_iter })
+        let bounded = BoundedIterator::new(full_iter, end_bound);
+
+        let mut iter = LsmIterator { inner: bounded };
+        if let Bound::Excluded(k) = &start {
+            while iter.is_valid() && iter.inner.key().data() == k.as_ref() {
+                iter.inner.next()?;
+            }
+        }
+
+        Ok(iter)
     }
 }
 
@@ -355,9 +401,11 @@ impl Drop for Lsm {
     }
 }
 
-type InnerLsmIterator = TwoMergeIterator<
-    TwoMergeIterator<MemTableIterator, MergeIterator<MemTableIterator>>,
-    TwoMergeIterator<MergeIterator<SSTableIterator>, MergeIterator<SSTableIterator>>,
+type InnerLsmIterator = BoundedIterator<
+    TwoMergeIterator<
+        TwoMergeIterator<MemTableIterator, MergeIterator<MemTableIterator>>,
+        TwoMergeIterator<MergeIterator<SSTableIterator>, MergeIterator<SSTableIterator>>,
+    >,
 >;
 
 pub struct LsmIterator {
