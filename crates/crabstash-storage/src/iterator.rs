@@ -2,6 +2,7 @@ use bytes::Bytes;
 use crabstash_common::{Key, Result};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::ops::Bound;
 
 pub struct Entry {
     pub key: Key,
