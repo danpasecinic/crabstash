@@ -12,10 +12,34 @@ use crate::iterator::StorageIterator;
 const SSTABLE_MAGIC: u32 = 0x53535442;
 const BLOCK_SIZE: usize = 4096;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompressionType {
+    #[default]
+    None,
+    Lz4,
+}
+
+impl CompressionType {
+    fn to_u8(self) -> u8 {
+        match self {
+            CompressionType::None => 0,
+            CompressionType::Lz4 => 1,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => CompressionType::Lz4,
+            _ => CompressionType::None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockMeta {
     pub offset: u64,
     pub length: u32,
+    pub uncompressed_length: u32,
     pub first_key: Bytes,
     pub last_key: Bytes,
 }
@@ -25,6 +49,7 @@ pub struct SSTable {
     path: PathBuf,
     block_metas: Vec<BlockMeta>,
     bloom: BloomFilter,
+    compression: CompressionType,
     cache: Option<Arc<BlockCache>>,
     pub id: u64,
     pub min_key: Bytes,
