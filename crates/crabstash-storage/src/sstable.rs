@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::bloom::BloomFilter;
+use crate::cache::{BlockCache, BlockCacheKey};
 use crate::iterator::StorageIterator;
 
 const SSTABLE_MAGIC: u32 = 0x53535442;
@@ -24,6 +25,7 @@ pub struct SSTable {
     path: PathBuf,
     block_metas: Vec<BlockMeta>,
     bloom: BloomFilter,
+    cache: Option<Arc<BlockCache>>,
     pub id: u64,
     pub min_key: Bytes,
     pub max_key: Bytes,
@@ -31,6 +33,14 @@ pub struct SSTable {
 
 impl SSTable {
     pub fn open(id: u64, path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_cache(id, path, None)
+    }
+
+    pub fn open_with_cache(
+        id: u64,
+        path: impl AsRef<Path>,
+        cache: Option<Arc<BlockCache>>,
+    ) -> Result<Self> {
         let mut file = File::open(path.as_ref())?;
 
         file.seek(SeekFrom::End(-4))?;
@@ -59,6 +69,7 @@ impl SSTable {
             path: path.as_ref().to_path_buf(),
             block_metas,
             bloom,
+            cache,
             id,
             min_key,
             max_key,
@@ -119,7 +130,11 @@ impl SSTable {
         }
 
         let block = self.read_block(block_idx)?;
-        Self::search_block(&block, key)
+        Self::search_block(&block[..], key)
+    }
+
+    pub fn cache(&self) -> Option<&Arc<BlockCache>> {
+        self.cache.as_ref()
     }
 
     fn find_block(&self, key: &[u8]) -> usize {
@@ -128,7 +143,25 @@ impl SSTable {
             .unwrap_or_else(|idx| idx.saturating_sub(1))
     }
 
-    fn read_block(&mut self, idx: usize) -> Result<Vec<u8>> {
+    fn read_block(&mut self, idx: usize) -> Result<Bytes> {
+        let cache_key = BlockCacheKey::new(self.id, idx);
+
+        if let Some(ref cache) = self.cache
+            && let Some(block) = cache.get(&cache_key)
+        {
+            return Ok((*block).clone());
+        }
+
+        let block = self.read_block_from_disk(idx)?;
+
+        if let Some(ref cache) = self.cache {
+            cache.insert(cache_key, block.clone());
+        }
+
+        Ok(block)
+    }
+
+    fn read_block_from_disk(&mut self, idx: usize) -> Result<Bytes> {
         let meta = &self.block_metas[idx];
         self.file.seek(SeekFrom::Start(meta.offset))?;
 
@@ -144,7 +177,7 @@ impl SSTable {
         }
 
         block.truncate(checksum_start);
-        Ok(block)
+        Ok(Bytes::from(block))
     }
 
     fn search_block(block: &[u8], search_key: &[u8]) -> Result<Option<Bytes>> {
@@ -183,6 +216,40 @@ impl SSTable {
 
     pub fn block_meta(&self, idx: usize) -> &BlockMeta {
         &self.block_metas[idx]
+    }
+
+    pub fn read_block_cached(&self, idx: usize) -> Result<Bytes> {
+        let cache_key = BlockCacheKey::new(self.id, idx);
+
+        if let Some(ref cache) = self.cache
+            && let Some(block) = cache.get(&cache_key)
+        {
+            return Ok((*block).clone());
+        }
+
+        let meta = &self.block_metas[idx];
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(meta.offset))?;
+
+        let mut block = vec![0u8; meta.length as usize];
+        file.read_exact(&mut block)?;
+
+        let checksum_start = block.len() - 4;
+        let expected = u32::from_le_bytes(block[checksum_start..].try_into().unwrap());
+        let actual = crc32fast::hash(&block[..checksum_start]);
+
+        if expected != actual {
+            return Err(Error::Corruption("Block checksum mismatch".into()).into());
+        }
+
+        block.truncate(checksum_start);
+        let block = Bytes::from(block);
+
+        if let Some(ref cache) = self.cache {
+            cache.insert(cache_key, block.clone());
+        }
+
+        Ok(block)
     }
 }
 
@@ -241,22 +308,8 @@ impl SSTableIterator {
             return Ok(());
         }
 
-        let meta = &self.table.block_metas[idx];
-        let mut file = File::open(&self.table.path)?;
-        file.seek(SeekFrom::Start(meta.offset))?;
-
-        self.block_data = vec![0u8; meta.length as usize];
-        file.read_exact(&mut self.block_data)?;
-
-        let checksum_start = self.block_data.len() - 4;
-        let expected = u32::from_le_bytes(self.block_data[checksum_start..].try_into().unwrap());
-        let actual = crc32fast::hash(&self.block_data[..checksum_start]);
-
-        if expected != actual {
-            return Err(Error::Corruption("Block checksum mismatch".into()).into());
-        }
-
-        self.block_data.truncate(checksum_start);
+        let block = self.table.read_block_cached(idx)?;
+        self.block_data = block.to_vec();
         self.block_offset = 0;
         self.block_idx = idx;
         Ok(())

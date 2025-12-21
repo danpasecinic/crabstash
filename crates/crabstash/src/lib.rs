@@ -8,10 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use crabstash_common::Error as DbError;
+pub use crabstash_storage::CacheStats;
 pub use crabstash_txn::IsolationLevel as Isolation;
 
 pub struct DbOptions {
     pub memtable_size: usize,
+    pub block_cache_capacity: u64,
     pub sync_writes: bool,
 }
 
@@ -19,6 +21,7 @@ impl Default for DbOptions {
     fn default() -> Self {
         Self {
             memtable_size: 4 * 1024 * 1024,
+            block_cache_capacity: 64 * 1024 * 1024,
             sync_writes: false,
         }
     }
@@ -36,6 +39,7 @@ impl Db {
     pub fn open_with_options(path: impl AsRef<Path>, options: DbOptions) -> Result<Self> {
         let lsm_options = LsmOptions {
             memtable_size: options.memtable_size,
+            block_cache_capacity: options.block_cache_capacity,
             ..Default::default()
         };
 
@@ -84,6 +88,10 @@ impl Db {
 
     pub fn sync(&self) -> Result<()> {
         self.engine.storage().sync()
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        self.engine.storage().cache_stats()
     }
 
     pub fn scan(&self) -> Result<DbIterator> {

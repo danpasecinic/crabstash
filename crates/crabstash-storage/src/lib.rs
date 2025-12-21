@@ -1,4 +1,5 @@
 mod bloom;
+mod cache;
 mod compaction;
 pub mod iterator;
 mod lsm;
@@ -7,8 +8,9 @@ mod memtable;
 mod sstable;
 mod wal;
 
+pub use cache::BlockCache;
 pub use iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
-pub use lsm::{Lsm, LsmIterator, LsmOptions};
+pub use lsm::{CacheStats, Lsm, LsmIterator, LsmOptions};
 pub use memtable::{MemTable, MemTableIterator};
 pub use sstable::{SSTable, SSTableBuilder, SSTableIterator};
 pub use wal::Wal;

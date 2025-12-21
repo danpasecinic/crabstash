@@ -1,3 +1,4 @@
+use crate::cache::BlockCache;
 use crate::compaction::Compactor;
 use crate::iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
 use crate::manifest::Manifest;
@@ -16,10 +17,18 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tracing::{debug, info, instrument};
 
+#[derive(Debug, Clone)]
+pub struct CacheStats {
+    pub entry_count: u64,
+    pub weighted_size: u64,
+    pub capacity: u64,
+}
+
 pub struct LsmOptions {
     pub memtable_size: usize,
     pub block_size: usize,
     pub bloom_fp_rate: f64,
+    pub block_cache_capacity: u64,
 }
 
 impl Default for LsmOptions {
@@ -28,6 +37,7 @@ impl Default for LsmOptions {
             memtable_size: 4 * 1024 * 1024,
             block_size: 4096,
             bloom_fp_rate: 0.01,
+            block_cache_capacity: 64 * 1024 * 1024,
         }
     }
 }
@@ -51,6 +61,7 @@ pub struct Lsm {
     dir: PathBuf,
     options: LsmOptions,
     next_ts: AtomicU64,
+    block_cache: Arc<BlockCache>,
     compaction_state: Arc<CompactionState>,
     compaction_thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -60,6 +71,8 @@ impl Lsm {
     pub fn open(dir: impl AsRef<Path>, options: LsmOptions) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
+
+        let block_cache = Arc::new(BlockCache::new(options.block_cache_capacity));
 
         let manifest_path = dir.join("MANIFEST");
         let manifest = if manifest_path.exists() {
@@ -74,7 +87,11 @@ impl Lsm {
             for &id in &meta.sst_ids {
                 let path = dir.join(format!("{:06}.sst", id));
                 if path.exists() {
-                    ssts.push(SSTable::open(id, path)?);
+                    ssts.push(SSTable::open_with_cache(
+                        id,
+                        path,
+                        Some(block_cache.clone()),
+                    )?);
                 }
             }
             levels.insert(*level, ssts);
@@ -122,6 +139,7 @@ impl Lsm {
             dir: dir.clone(),
             options,
             next_ts: AtomicU64::new(1),
+            block_cache,
             compaction_state: compaction_state.clone(),
             compaction_thread: Mutex::new(None),
         };
@@ -300,7 +318,11 @@ impl Lsm {
         builder.finish()?;
         inner.manifest.add_sst(0, sst_id)?;
 
-        let sst = SSTable::open(sst_id, self.dir.join(format!("{:06}.sst", sst_id)))?;
+        let sst = SSTable::open_with_cache(
+            sst_id,
+            self.dir.join(format!("{:06}.sst", sst_id)),
+            Some(self.block_cache.clone()),
+        )?;
         inner.levels.entry(0).or_default().push(sst);
 
         inner.immutable_memtables.retain(|m| !Arc::ptr_eq(m, &imm));
@@ -314,6 +336,18 @@ impl Lsm {
         let mut inner = self.inner.write();
         inner.wal.sync()?;
         Ok(())
+    }
+
+    pub fn block_cache(&self) -> &Arc<BlockCache> {
+        &self.block_cache
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        CacheStats {
+            entry_count: self.block_cache.entry_count(),
+            weighted_size: self.block_cache.weighted_size(),
+            capacity: self.options.block_cache_capacity,
+        }
     }
 
     pub fn scan(&self) -> Result<LsmIterator> {
@@ -363,7 +397,11 @@ impl Lsm {
         let mut l0_iters: Vec<SSTableIterator> = Vec::new();
         if let Some(l0_ssts) = inner.levels.get(&0) {
             for sst in l0_ssts.iter().rev() {
-                let sst_arc = Arc::new(SSTable::open(sst.id, sst.path())?);
+                let sst_arc = Arc::new(SSTable::open_with_cache(
+                    sst.id,
+                    sst.path(),
+                    Some(self.block_cache.clone()),
+                )?);
                 let mut iter = SSTableIterator::new(sst_arc)?;
                 if let Some(key) = start_key {
                     iter.seek(key)?;
@@ -377,7 +415,11 @@ impl Lsm {
         for level in 1..7 {
             if let Some(ssts) = inner.levels.get(&level) {
                 for sst in ssts {
-                    let sst_arc = Arc::new(SSTable::open(sst.id, sst.path())?);
+                    let sst_arc = Arc::new(SSTable::open_with_cache(
+                        sst.id,
+                        sst.path(),
+                        Some(self.block_cache.clone()),
+                    )?);
                     let mut iter = SSTableIterator::new(sst_arc)?;
                     if let Some(key) = start_key {
                         iter.seek(key)?;
