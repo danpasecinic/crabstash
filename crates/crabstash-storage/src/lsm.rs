@@ -3,7 +3,7 @@ use crate::compaction::Compactor;
 use crate::iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
 use crate::manifest::Manifest;
 use crate::memtable::{MemTable, MemTableIterator};
-use crate::sstable::{SSTable, SSTableBuilder, SSTableIterator};
+use crate::sstable::{CompressionType, SSTable, SSTableBuilder, SSTableIterator};
 use crate::wal::{RecordType, Wal, WalRecord};
 use bytes::Bytes;
 use crabstash_common::{Key, Result};
@@ -29,6 +29,7 @@ pub struct LsmOptions {
     pub block_size: usize,
     pub bloom_fp_rate: f64,
     pub block_cache_capacity: u64,
+    pub compression: CompressionType,
 }
 
 impl Default for LsmOptions {
@@ -38,6 +39,7 @@ impl Default for LsmOptions {
             block_size: 4096,
             bloom_fp_rate: 0.01,
             block_cache_capacity: 64 * 1024 * 1024,
+            compression: CompressionType::Lz4,
         }
     }
 }
@@ -309,7 +311,12 @@ impl Lsm {
     #[instrument(skip(self, inner, imm), fields(entries = imm.len()))]
     fn flush_immutable(&self, inner: &mut LsmInner, imm: Arc<MemTable>) -> Result<()> {
         let sst_id = inner.manifest.allocate_sst_id();
-        let mut builder = SSTableBuilder::new(sst_id, &self.dir, imm.len())?;
+        let mut builder = SSTableBuilder::new_with_compression(
+            sst_id,
+            &self.dir,
+            imm.len(),
+            self.options.compression,
+        )?;
 
         for (key, value) in imm.iter() {
             builder.add(&key, value.as_ref())?;

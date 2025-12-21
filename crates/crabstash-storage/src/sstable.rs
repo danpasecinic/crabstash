@@ -87,13 +87,15 @@ impl SSTable {
         reader.read_to_end(&mut meta_data)?;
         meta_data.truncate(meta_data.len() - 12);
 
-        let (block_metas, bloom, min_key, max_key) = Self::decode_metadata(&meta_data)?;
+        let (block_metas, bloom, compression, min_key, max_key) =
+            Self::decode_metadata(&meta_data)?;
 
         Ok(Self {
             file: File::open(path.as_ref())?,
             path: path.as_ref().to_path_buf(),
             block_metas,
             bloom,
+            compression,
             cache,
             id,
             min_key,
@@ -101,15 +103,19 @@ impl SSTable {
         })
     }
 
-    fn decode_metadata(data: &[u8]) -> Result<(Vec<BlockMeta>, BloomFilter, Bytes, Bytes)> {
+    fn decode_metadata(
+        data: &[u8],
+    ) -> Result<(Vec<BlockMeta>, BloomFilter, CompressionType, Bytes, Bytes)> {
         let mut buf = data;
 
+        let compression = CompressionType::from_u8(buf.get_u8());
         let num_blocks = buf.get_u32_le() as usize;
         let mut block_metas = Vec::with_capacity(num_blocks);
 
         for _ in 0..num_blocks {
             let offset = buf.get_u64_le();
             let length = buf.get_u32_le();
+            let uncompressed_length = buf.get_u32_le();
             let first_key_len = buf.get_u32_le() as usize;
             let first_key = Bytes::copy_from_slice(&buf[..first_key_len]);
             buf.advance(first_key_len);
@@ -120,6 +126,7 @@ impl SSTable {
             block_metas.push(BlockMeta {
                 offset,
                 length,
+                uncompressed_length,
                 first_key,
                 last_key,
             });
@@ -141,7 +148,7 @@ impl SSTable {
             .map(|b| b.last_key.clone())
             .unwrap_or_default();
 
-        Ok((block_metas, bloom, min_key, max_key))
+        Ok((block_metas, bloom, compression, min_key, max_key))
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>> {
@@ -202,7 +209,21 @@ impl SSTable {
         }
 
         block.truncate(checksum_start);
-        Ok(Bytes::from(block))
+
+        let decompressed = self.decompress_block(&block, meta.uncompressed_length as usize)?;
+        Ok(Bytes::from(decompressed))
+    }
+
+    fn decompress_block(&self, data: &[u8], uncompressed_len: usize) -> Result<Vec<u8>> {
+        match self.compression {
+            CompressionType::None => Ok(data.to_vec()),
+            CompressionType::Lz4 => {
+                let mut output = vec![0u8; uncompressed_len];
+                lz4_flex::decompress_into(data, &mut output)
+                    .map_err(|e| Error::Corruption(format!("LZ4 decompression failed: {}", e)))?;
+                Ok(output)
+            }
+        }
     }
 
     fn search_block(block: &[u8], search_key: &[u8]) -> Result<Option<Bytes>> {
@@ -268,7 +289,9 @@ impl SSTable {
         }
 
         block.truncate(checksum_start);
-        let block = Bytes::from(block);
+
+        let decompressed = self.decompress_block(&block, meta.uncompressed_length as usize)?;
+        let block = Bytes::from(decompressed);
 
         if let Some(ref cache) = self.cache {
             cache.insert(cache_key, block.clone());
@@ -411,11 +434,21 @@ pub struct SSTableBuilder {
     block_first_key: Option<Bytes>,
     block_offset: u64,
     bloom: BloomFilter,
+    compression: CompressionType,
     num_keys: usize,
 }
 
 impl SSTableBuilder {
     pub fn new(id: u64, dir: impl AsRef<Path>, estimated_keys: usize) -> Result<Self> {
+        Self::new_with_compression(id, dir, estimated_keys, CompressionType::None)
+    }
+
+    pub fn new_with_compression(
+        id: u64,
+        dir: impl AsRef<Path>,
+        estimated_keys: usize,
+        compression: CompressionType,
+    ) -> Result<Self> {
         let path = dir.as_ref().join(format!("{:06}.sst", id));
         let file = File::create(&path)?;
 
@@ -427,6 +460,7 @@ impl SSTableBuilder {
             block_first_key: None,
             block_offset: 0,
             bloom: BloomFilter::new(estimated_keys.max(1), 0.01),
+            compression,
             num_keys: 0,
         })
     }
@@ -466,15 +500,21 @@ impl SSTableBuilder {
             return Ok(());
         }
 
-        let checksum = crc32fast::hash(&self.current_block);
-        self.current_block.put_u32_le(checksum);
+        let uncompressed_length = self.current_block.len() as u32;
 
-        let length = self.current_block.len() as u32;
-        self.writer.write_all(&self.current_block)?;
+        let compressed = self.compress_block(&self.current_block);
+        let mut output = BytesMut::from(compressed.as_slice());
+
+        let checksum = crc32fast::hash(&output);
+        output.put_u32_le(checksum);
+
+        let length = output.len() as u32;
+        self.writer.write_all(&output)?;
 
         self.block_metas.push(BlockMeta {
             offset: self.block_offset,
             length,
+            uncompressed_length,
             first_key: self.block_first_key.take().unwrap(),
             last_key,
         });
@@ -483,6 +523,13 @@ impl SSTableBuilder {
         self.current_block.clear();
 
         Ok(())
+    }
+
+    fn compress_block(&self, data: &[u8]) -> Vec<u8> {
+        match self.compression {
+            CompressionType::None => data.to_vec(),
+            CompressionType::Lz4 => lz4_flex::compress(data),
+        }
     }
 
     pub fn finish(mut self) -> Result<PathBuf> {
@@ -498,11 +545,13 @@ impl SSTableBuilder {
         let meta_offset = self.block_offset;
 
         let mut meta_buf = BytesMut::new();
+        meta_buf.put_u8(self.compression.to_u8());
         meta_buf.put_u32_le(self.block_metas.len() as u32);
 
         for meta in &self.block_metas {
             meta_buf.put_u64_le(meta.offset);
             meta_buf.put_u32_le(meta.length);
+            meta_buf.put_u32_le(meta.uncompressed_length);
             meta_buf.put_u32_le(meta.first_key.len() as u32);
             meta_buf.put_slice(&meta.first_key);
             meta_buf.put_u32_le(meta.last_key.len() as u32);
