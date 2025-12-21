@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use crabstash_common::Error as DbError;
-pub use crabstash_storage::{CacheStats, CompressionType};
+pub use crabstash_storage::{CacheStats, CompressionType, WriteBatch};
 pub use crabstash_txn::IsolationLevel as Isolation;
 
 pub struct DbOptions {
@@ -113,6 +113,10 @@ impl Db {
         let end = prefix_end_bound(prefix);
         let inner = self.engine.scan_range(Bound::Included(start), end)?;
         Ok(DbIterator { inner })
+    }
+
+    pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
+        self.engine.storage().write_batch(batch)
     }
 }
 

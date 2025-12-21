@@ -1,3 +1,4 @@
+mod batch;
 mod bloom;
 mod cache;
 mod compaction;
@@ -8,6 +9,7 @@ mod memtable;
 mod sstable;
 mod wal;
 
+pub use batch::{BatchOperation, WriteBatch};
 pub use cache::BlockCache;
 pub use iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
 pub use lsm::{CacheStats, Lsm, LsmIterator, LsmOptions};
