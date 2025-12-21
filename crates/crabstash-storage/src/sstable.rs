@@ -146,10 +146,10 @@ impl SSTable {
     fn read_block(&mut self, idx: usize) -> Result<Bytes> {
         let cache_key = BlockCacheKey::new(self.id, idx);
 
-        if let Some(ref cache) = self.cache {
-            if let Some(block) = cache.get(&cache_key) {
-                return Ok((*block).clone());
-            }
+        if let Some(ref cache) = self.cache
+            && let Some(block) = cache.get(&cache_key)
+        {
+            return Ok((*block).clone());
         }
 
         let block = self.read_block_from_disk(idx)?;
@@ -221,10 +221,10 @@ impl SSTable {
     pub fn read_block_cached(&self, idx: usize) -> Result<Bytes> {
         let cache_key = BlockCacheKey::new(self.id, idx);
 
-        if let Some(ref cache) = self.cache {
-            if let Some(block) = cache.get(&cache_key) {
-                return Ok((*block).clone());
-            }
+        if let Some(ref cache) = self.cache
+            && let Some(block) = cache.get(&cache_key)
+        {
+            return Ok((*block).clone());
         }
 
         let meta = &self.block_metas[idx];
