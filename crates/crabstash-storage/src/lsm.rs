@@ -1,3 +1,4 @@
+use crate::batch::{BatchOperation, WriteBatch};
 use crate::cache::BlockCache;
 use crate::compaction::Compactor;
 use crate::iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
@@ -287,6 +288,62 @@ impl Lsm {
 
         let key = Key::new(key, ts);
         inner.memtable.delete(key);
+
+        Ok(())
+    }
+
+    #[instrument(skip(self, batch), fields(batch_size = batch.len()))]
+    pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let operations = batch.into_operations();
+        let base_ts = self
+            .next_ts
+            .fetch_add(operations.len() as u64, Ordering::Relaxed);
+
+        let wal_records: Vec<WalRecord> = operations
+            .iter()
+            .enumerate()
+            .map(|(i, op)| {
+                let ts = base_ts + i as u64;
+                match op {
+                    BatchOperation::Put { key, value } => WalRecord {
+                        record_type: RecordType::Put,
+                        key: key.clone(),
+                        value: Some(value.clone()),
+                        timestamp: ts,
+                    },
+                    BatchOperation::Delete { key } => WalRecord {
+                        record_type: RecordType::Delete,
+                        key: key.clone(),
+                        value: None,
+                        timestamp: ts,
+                    },
+                }
+            })
+            .collect();
+
+        let mut inner = self.inner.write();
+        inner.wal.append_batch(&wal_records)?;
+
+        for (i, op) in operations.into_iter().enumerate() {
+            let ts = base_ts + i as u64;
+            match op {
+                BatchOperation::Put { key, value } => {
+                    inner.memtable.put(Key::new(key, ts), value);
+                }
+                BatchOperation::Delete { key } => {
+                    inner.memtable.delete(Key::new(key, ts));
+                }
+            }
+        }
+
+        if inner.memtable.size() >= self.options.memtable_size {
+            info!("memtable full, rotating");
+            self.rotate_memtable(&mut inner)?;
+        }
 
         Ok(())
     }
