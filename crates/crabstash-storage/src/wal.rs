@@ -65,24 +65,36 @@ impl Wal {
     }
 
     pub fn append(&mut self, record: &WalRecord) -> Result<()> {
-        let mut buf = BytesMut::new();
-
-        buf.put_u8(record.record_type as u8);
-        buf.put_u64_le(record.timestamp);
-        buf.put_u32_le(record.key.len() as u32);
-        buf.put_slice(&record.key);
-
-        if let Some(ref value) = record.value {
-            buf.put_u32_le(value.len() as u32);
-            buf.put_slice(value);
-        }
-
+        let buf = Self::encode_record(record);
         let checksum = crc32fast::hash(&buf);
         self.writer.write_all(&checksum.to_le_bytes())?;
         self.writer.write_all(&(buf.len() as u32).to_le_bytes())?;
         self.writer.write_all(&buf)?;
-
         Ok(())
+    }
+
+    pub fn append_batch(&mut self, records: &[WalRecord]) -> Result<()> {
+        for record in records {
+            let buf = Self::encode_record(record);
+            let checksum = crc32fast::hash(&buf);
+            self.writer.write_all(&checksum.to_le_bytes())?;
+            self.writer.write_all(&(buf.len() as u32).to_le_bytes())?;
+            self.writer.write_all(&buf)?;
+        }
+        Ok(())
+    }
+
+    fn encode_record(record: &WalRecord) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.put_u8(record.record_type as u8);
+        buf.put_u64_le(record.timestamp);
+        buf.put_u32_le(record.key.len() as u32);
+        buf.put_slice(&record.key);
+        if let Some(ref value) = record.value {
+            buf.put_u32_le(value.len() as u32);
+            buf.put_slice(value);
+        }
+        buf
     }
 
     pub fn sync(&mut self) -> Result<()> {
