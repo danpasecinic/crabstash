@@ -8,12 +8,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use crabstash_common::Error as DbError;
-pub use crabstash_storage::CacheStats;
+pub use crabstash_storage::{CacheStats, CompressionType};
 pub use crabstash_txn::IsolationLevel as Isolation;
 
 pub struct DbOptions {
     pub memtable_size: usize,
     pub block_cache_capacity: u64,
+    pub compression: CompressionType,
     pub sync_writes: bool,
 }
 
@@ -22,6 +23,7 @@ impl Default for DbOptions {
         Self {
             memtable_size: 4 * 1024 * 1024,
             block_cache_capacity: 64 * 1024 * 1024,
+            compression: CompressionType::Lz4,
             sync_writes: false,
         }
     }
@@ -40,6 +42,7 @@ impl Db {
         let lsm_options = LsmOptions {
             memtable_size: options.memtable_size,
             block_cache_capacity: options.block_cache_capacity,
+            compression: options.compression,
             ..Default::default()
         };
 
