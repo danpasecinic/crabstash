@@ -46,10 +46,11 @@ impl MvccEngine {
             return Ok(local_value.cloned());
         }
 
+        let start_ts = txn_guard.start_ts;
         txn_guard.record_read(Bytes::copy_from_slice(key));
         drop(txn_guard);
 
-        self.storage.get(key)
+        self.storage.get_at_ts(key, start_ts)
     }
 
     pub fn put(

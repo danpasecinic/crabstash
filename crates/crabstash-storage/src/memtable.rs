@@ -23,6 +23,20 @@ impl MemTable {
         self.map.get(key).map(|entry| entry.value().clone())
     }
 
+    pub fn get_at_ts(&self, key_data: &[u8], ts: u64) -> Option<Option<Bytes>> {
+        let search_key = Key::new(Bytes::copy_from_slice(key_data), ts);
+        for entry in self.map.range(search_key..) {
+            let entry_key = entry.key();
+            if entry_key.data() != key_data {
+                return None;
+            }
+            if entry_key.timestamp() <= ts {
+                return Some(entry.value().clone());
+            }
+        }
+        None
+    }
+
     pub fn put(&self, key: Key, value: Bytes) {
         let size_delta = key.data().len() + value.len();
         self.map.insert(key, Some(value));

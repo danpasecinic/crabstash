@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use crabstash_common::Result;
-use crabstash_storage::{Lsm, LsmOptions};
+use crabstash_storage::{Lsm, LsmOptions, SnapshotLsmIterator};
 use crabstash_txn::{IsolationLevel, LsmIterator, MvccEngine, Transaction};
 use parking_lot::Mutex;
 use std::ops::Bound;
@@ -118,6 +118,53 @@ impl Db {
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
         self.engine.storage().write_batch(batch)
     }
+
+    pub fn snapshot(&self) -> Snapshot<'_> {
+        let ts = self.engine.storage().current_ts();
+        Snapshot {
+            ts,
+            storage: self.engine.storage(),
+        }
+    }
+}
+
+pub struct Snapshot<'a> {
+    ts: u64,
+    storage: &'a Arc<Lsm>,
+}
+
+impl<'a> Snapshot<'a> {
+    pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        let result = self.storage.get_at_ts(key.as_ref(), self.ts)?;
+        Ok(result.map(|b| b.to_vec()))
+    }
+
+    pub fn scan(&self) -> Result<SnapshotDbIterator> {
+        self.scan_range::<&[u8]>(Bound::Unbounded, Bound::Unbounded)
+    }
+
+    pub fn scan_range<K: AsRef<[u8]>>(
+        &self,
+        start: Bound<K>,
+        end: Bound<K>,
+    ) -> Result<SnapshotDbIterator> {
+        let inner = self
+            .storage
+            .scan_at_ts(bound_to_owned(start), bound_to_owned(end), self.ts)?;
+        Ok(SnapshotDbIterator { inner })
+    }
+
+    pub fn prefix_scan(&self, prefix: impl AsRef<[u8]>) -> Result<SnapshotDbIterator> {
+        let prefix = prefix.as_ref();
+        let start = Bound::Included(prefix.to_vec());
+        let end = prefix_end_bound(prefix);
+        let inner = self.storage.scan_at_ts(start, end, self.ts)?;
+        Ok(SnapshotDbIterator { inner })
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.ts
+    }
 }
 
 fn prefix_end_bound(prefix: &[u8]) -> Bound<Vec<u8>> {
@@ -130,6 +177,14 @@ fn prefix_end_bound(prefix: &[u8]) -> Bound<Vec<u8>> {
         }
     }
     Bound::Unbounded
+}
+
+fn bound_to_owned<K: AsRef<[u8]>>(bound: Bound<K>) -> Bound<Vec<u8>> {
+    match bound {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(k) => Bound::Included(k.as_ref().to_vec()),
+        Bound::Excluded(k) => Bound::Excluded(k.as_ref().to_vec()),
+    }
 }
 
 pub struct Txn<'a> {
@@ -160,46 +215,53 @@ impl<'a> Txn<'a> {
     }
 }
 
-pub struct DbIterator {
-    inner: LsmIterator,
-}
-
-impl DbIterator {
-    pub fn key(&self) -> Option<&[u8]> {
-        self.inner.key()
-    }
-
-    pub fn value(&self) -> Option<&[u8]> {
-        self.inner.value().map(|b| b.as_ref())
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.inner.is_valid()
-    }
-
-    pub fn advance(&mut self) -> Result<()> {
-        self.inner.advance()
-    }
-}
-
-impl Iterator for DbIterator {
-    type Item = Result<(Vec<u8>, Vec<u8>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.inner.is_valid() {
-            return None;
+macro_rules! impl_db_iterator {
+    ($name:ident, $inner:ty) => {
+        pub struct $name {
+            inner: $inner,
         }
 
-        let key = self.inner.key()?.to_vec();
-        let value = self.inner.value()?.to_vec();
+        impl $name {
+            pub fn key(&self) -> Option<&[u8]> {
+                self.inner.key()
+            }
 
-        if let Err(e) = self.inner.advance() {
-            return Some(Err(e));
+            pub fn value(&self) -> Option<&[u8]> {
+                self.inner.value().map(|b| b.as_ref())
+            }
+
+            pub fn is_valid(&self) -> bool {
+                self.inner.is_valid()
+            }
+
+            pub fn advance(&mut self) -> Result<()> {
+                self.inner.advance()
+            }
         }
 
-        Some(Ok((key, value)))
-    }
+        impl Iterator for $name {
+            type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if !self.inner.is_valid() {
+                    return None;
+                }
+
+                let key = self.inner.key()?.to_vec();
+                let value = self.inner.value()?.to_vec();
+
+                if let Err(e) = self.inner.advance() {
+                    return Some(Err(e));
+                }
+
+                Some(Ok((key, value)))
+            }
+        }
+    };
 }
+
+impl_db_iterator!(DbIterator, LsmIterator);
+impl_db_iterator!(SnapshotDbIterator, SnapshotLsmIterator);
 
 #[cfg(test)]
 mod tests {

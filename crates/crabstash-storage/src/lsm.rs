@@ -1,7 +1,9 @@
 use crate::batch::{BatchOperation, WriteBatch};
 use crate::cache::BlockCache;
 use crate::compaction::Compactor;
-use crate::iterator::{BoundedIterator, MergeIterator, StorageIterator, TwoMergeIterator};
+use crate::iterator::{
+    BoundedIterator, MergeIterator, SnapshotIterator, StorageIterator, TwoMergeIterator,
+};
 use crate::manifest::Manifest;
 use crate::memtable::{MemTable, MemTableIterator};
 use crate::sstable::{CompressionType, SSTable, SSTableBuilder, SSTableIterator};
@@ -179,13 +181,13 @@ impl Lsm {
             drop(work);
 
             let manifest_path = dir.join("MANIFEST");
-            let manifest = match crate::manifest::Manifest::open(&manifest_path) {
+            let manifest = match Manifest::open(&manifest_path) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
 
             if let Some(task) = compactor.pick_compaction(&manifest) {
-                let mut manifest = match crate::manifest::Manifest::open(&manifest_path) {
+                let mut manifest = match Manifest::open(&manifest_path) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
@@ -206,17 +208,19 @@ impl Lsm {
     #[instrument(skip(self, key), fields(key_len = key.len()))]
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let ts = self.next_ts.load(Ordering::Relaxed);
-        let search_key = Key::new(Bytes::copy_from_slice(key), ts);
+        self.get_at_ts(key, ts)
+    }
 
+    pub fn get_at_ts(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
         let inner = self.inner.read();
 
-        if let Some(value) = inner.memtable.get(&search_key) {
+        if let Some(value) = inner.memtable.get_at_ts(key, ts) {
             debug!("found in memtable");
             return Ok(value);
         }
 
         for imm in inner.immutable_memtables.iter().rev() {
-            if let Some(value) = imm.get(&search_key) {
+            if let Some(value) = imm.get_at_ts(key, ts) {
                 debug!("found in immutable memtable");
                 return Ok(value);
             }
@@ -414,8 +418,23 @@ impl Lsm {
         }
     }
 
+    pub fn current_ts(&self) -> u64 {
+        self.next_ts.load(Ordering::Relaxed)
+    }
+
     pub fn scan(&self) -> Result<LsmIterator> {
         self.scan_range::<&[u8]>(Bound::Unbounded, Bound::Unbounded)
+    }
+
+    pub fn scan_at_ts<K: AsRef<[u8]>>(
+        &self,
+        start: Bound<K>,
+        end: Bound<K>,
+        ts: u64,
+    ) -> Result<SnapshotLsmIterator> {
+        let bounded = self.build_scan_iterator(start, end)?;
+        let inner = SnapshotIterator::new(bounded, ts);
+        Ok(SnapshotLsmIterator { inner })
     }
 
     pub fn scan_range<K: AsRef<[u8]>>(
@@ -423,12 +442,21 @@ impl Lsm {
         start: Bound<K>,
         end: Bound<K>,
     ) -> Result<LsmIterator> {
+        let inner = self.build_scan_iterator(start, end)?;
+        Ok(LsmIterator { inner })
+    }
+
+    fn build_scan_iterator<K: AsRef<[u8]>>(
+        &self,
+        start: Bound<K>,
+        end: Bound<K>,
+    ) -> Result<InnerLsmIterator> {
         let inner = self.inner.read();
 
-        let start_key = match &start {
-            Bound::Unbounded => None,
-            Bound::Included(k) => Some(k.as_ref()),
-            Bound::Excluded(k) => Some(k.as_ref()),
+        let (start_key, excluded_key) = match &start {
+            Bound::Unbounded => (None, None),
+            Bound::Included(k) => (Some(k.as_ref()), None),
+            Bound::Excluded(k) => (Some(k.as_ref()), Some(k.as_ref().to_vec())),
         };
 
         let end_bound = match end {
@@ -437,6 +465,28 @@ impl Lsm {
             Bound::Excluded(k) => Bound::Excluded(Bytes::copy_from_slice(k.as_ref())),
         };
 
+        let mem_merge = self.build_memtable_iterator(&inner, start_key);
+        let l0_merge = self.build_l0_iterator(&inner, start_key)?;
+        let levels_merge = self.build_level_iterator(&inner, start_key)?;
+
+        let sst_merge = TwoMergeIterator::new(l0_merge, levels_merge);
+        let full_iter = TwoMergeIterator::new(mem_merge, sst_merge);
+        let mut bounded = BoundedIterator::new(full_iter, end_bound);
+
+        if let Some(excluded) = excluded_key {
+            while bounded.is_valid() && bounded.key().data() == excluded.as_slice() {
+                bounded.next()?;
+            }
+        }
+
+        Ok(bounded)
+    }
+
+    fn build_memtable_iterator(
+        &self,
+        inner: &LsmInner,
+        start_key: Option<&[u8]>,
+    ) -> TwoMergeIterator<MemTableIterator, MergeIterator<MemTableIterator>> {
         let mut memtable_iter = MemTableIterator::new(&inner.memtable);
         if let Some(key) = start_key {
             memtable_iter.seek(key);
@@ -455,36 +505,37 @@ impl Lsm {
             .collect();
         imm_iters.reverse();
 
-        let imm_merge = MergeIterator::new(imm_iters);
-        let mem_merge = TwoMergeIterator::new(memtable_iter, imm_merge);
+        TwoMergeIterator::new(memtable_iter, MergeIterator::new(imm_iters))
+    }
 
+    fn build_l0_iterator(
+        &self,
+        inner: &LsmInner,
+        start_key: Option<&[u8]>,
+    ) -> Result<MergeIterator<SSTableIterator>> {
         let mut l0_iters: Vec<SSTableIterator> = Vec::new();
         if let Some(l0_ssts) = inner.levels.get(&0) {
             for sst in l0_ssts.iter().rev() {
-                let sst_arc = Arc::new(SSTable::open_with_cache(
-                    sst.id,
-                    sst.path(),
-                    Some(self.block_cache.clone()),
-                )?);
-                let mut iter = SSTableIterator::new(sst_arc)?;
+                let mut iter = self.open_sst_iterator(sst)?;
                 if let Some(key) = start_key {
                     iter.seek(key)?;
                 }
                 l0_iters.push(iter);
             }
         }
-        let l0_merge = MergeIterator::new(l0_iters);
+        Ok(MergeIterator::new(l0_iters))
+    }
 
+    fn build_level_iterator(
+        &self,
+        inner: &LsmInner,
+        start_key: Option<&[u8]>,
+    ) -> Result<MergeIterator<SSTableIterator>> {
         let mut level_iters: Vec<SSTableIterator> = Vec::new();
         for level in 1..7 {
             if let Some(ssts) = inner.levels.get(&level) {
                 for sst in ssts {
-                    let sst_arc = Arc::new(SSTable::open_with_cache(
-                        sst.id,
-                        sst.path(),
-                        Some(self.block_cache.clone()),
-                    )?);
-                    let mut iter = SSTableIterator::new(sst_arc)?;
+                    let mut iter = self.open_sst_iterator(sst)?;
                     if let Some(key) = start_key {
                         iter.seek(key)?;
                     }
@@ -492,21 +543,16 @@ impl Lsm {
                 }
             }
         }
-        let levels_merge = MergeIterator::new(level_iters);
+        Ok(MergeIterator::new(level_iters))
+    }
 
-        let sst_merge = TwoMergeIterator::new(l0_merge, levels_merge);
-        let full_iter = TwoMergeIterator::new(mem_merge, sst_merge);
-
-        let bounded = BoundedIterator::new(full_iter, end_bound);
-
-        let mut iter = LsmIterator { inner: bounded };
-        if let Bound::Excluded(k) = &start {
-            while iter.is_valid() && iter.inner.key().data() == k.as_ref() {
-                iter.inner.next()?;
-            }
-        }
-
-        Ok(iter)
+    fn open_sst_iterator(&self, sst: &SSTable) -> Result<SSTableIterator> {
+        let sst_arc = Arc::new(SSTable::open_with_cache(
+            sst.id,
+            sst.path(),
+            Some(self.block_cache.clone()),
+        )?);
+        SSTableIterator::new(sst_arc)
     }
 }
 
@@ -530,32 +576,39 @@ type InnerLsmIterator = BoundedIterator<
     >,
 >;
 
-pub struct LsmIterator {
-    inner: InnerLsmIterator,
+macro_rules! impl_lsm_iterator {
+    ($name:ident, $inner:ty) => {
+        pub struct $name {
+            inner: $inner,
+        }
+
+        impl $name {
+            pub fn key(&self) -> Option<&[u8]> {
+                if self.is_valid() {
+                    Some(self.inner.key().data())
+                } else {
+                    None
+                }
+            }
+
+            pub fn value(&self) -> Option<&Bytes> {
+                if self.is_valid() {
+                    self.inner.value()
+                } else {
+                    None
+                }
+            }
+
+            pub fn is_valid(&self) -> bool {
+                self.inner.is_valid()
+            }
+
+            pub fn advance(&mut self) -> Result<()> {
+                self.inner.next()
+            }
+        }
+    };
 }
 
-impl LsmIterator {
-    pub fn key(&self) -> Option<&[u8]> {
-        if self.is_valid() {
-            Some(self.inner.key().data())
-        } else {
-            None
-        }
-    }
-
-    pub fn value(&self) -> Option<&Bytes> {
-        if self.is_valid() {
-            self.inner.value()
-        } else {
-            None
-        }
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.inner.is_valid()
-    }
-
-    pub fn advance(&mut self) -> Result<()> {
-        self.inner.next()
-    }
-}
+impl_lsm_iterator!(LsmIterator, InnerLsmIterator);
+impl_lsm_iterator!(SnapshotLsmIterator, SnapshotIterator<InnerLsmIterator>);
