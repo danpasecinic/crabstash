@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use wide::u8x16;
 
 const CHUNK_SIZE: usize = 16;
+const ALL_EQUAL_MASK: u32 = 0xFFFF;
 
 #[inline]
 pub fn compare_bytes(a: &[u8], b: &[u8]) -> Ordering {
@@ -9,14 +10,14 @@ pub fn compare_bytes(a: &[u8], b: &[u8]) -> Ordering {
 
     let mut offset = 0;
     while offset + CHUNK_SIZE <= min_len {
-        let chunk_a = u8x16::from(load_chunk(&a[offset..]));
-        let chunk_b = u8x16::from(load_chunk(&b[offset..]));
+        let chunk_a = u8x16::new(load_chunk(&a[offset..]));
+        let chunk_b = u8x16::new(load_chunk(&b[offset..]));
 
-        let eq_mask = chunk_a.cmp_eq(chunk_b);
-        let bitmask = eq_mask.move_mask();
+        let eq_mask = chunk_a.simd_eq(chunk_b);
+        let bitmask = eq_mask.to_bitmask();
 
-        if bitmask != 0xFFFF {
-            let first_diff = bitmask.trailing_ones() as usize;
+        if bitmask != ALL_EQUAL_MASK {
+            let first_diff = (!bitmask).trailing_zeros() as usize;
             let idx = offset + first_diff;
             return a[idx].cmp(&b[idx]);
         }
@@ -44,11 +45,11 @@ pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
     let mut offset = 0;
 
     while offset + CHUNK_SIZE <= len {
-        let chunk_a = u8x16::from(load_chunk(&a[offset..]));
-        let chunk_b = u8x16::from(load_chunk(&b[offset..]));
+        let chunk_a = u8x16::new(load_chunk(&a[offset..]));
+        let chunk_b = u8x16::new(load_chunk(&b[offset..]));
 
-        let eq_mask = chunk_a.cmp_eq(chunk_b);
-        if eq_mask.move_mask() != 0xFFFF {
+        let eq_mask = chunk_a.simd_eq(chunk_b);
+        if eq_mask.to_bitmask() != ALL_EQUAL_MASK {
             return false;
         }
 
