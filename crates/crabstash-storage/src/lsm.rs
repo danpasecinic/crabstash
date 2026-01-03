@@ -206,17 +206,19 @@ impl Lsm {
     #[instrument(skip(self, key), fields(key_len = key.len()))]
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let ts = self.next_ts.load(Ordering::Relaxed);
-        let search_key = Key::new(Bytes::copy_from_slice(key), ts);
+        self.get_at_ts(key, ts)
+    }
 
+    pub fn get_at_ts(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
         let inner = self.inner.read();
 
-        if let Some(value) = inner.memtable.get(&search_key) {
+        if let Some(value) = inner.memtable.get_at_ts(key, ts) {
             debug!("found in memtable");
             return Ok(value);
         }
 
         for imm in inner.immutable_memtables.iter().rev() {
-            if let Some(value) = imm.get(&search_key) {
+            if let Some(value) = imm.get_at_ts(key, ts) {
                 debug!("found in immutable memtable");
                 return Ok(value);
             }
