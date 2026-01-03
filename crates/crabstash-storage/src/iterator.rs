@@ -210,3 +210,64 @@ impl<I: StorageIterator> StorageIterator for BoundedIterator<I> {
         Ok(())
     }
 }
+
+pub struct SnapshotIterator<I: StorageIterator> {
+    inner: I,
+    snapshot_ts: u64,
+    last_key: Option<Bytes>,
+}
+
+impl<I: StorageIterator> SnapshotIterator<I> {
+    pub fn new(inner: I, snapshot_ts: u64) -> Self {
+        let mut iter = Self {
+            inner,
+            snapshot_ts,
+            last_key: None,
+        };
+        iter.advance_to_visible();
+        iter
+    }
+
+    fn advance_to_visible(&mut self) {
+        while self.inner.is_valid() {
+            let key = self.inner.key();
+            let dominated = self
+                .last_key
+                .as_ref()
+                .is_some_and(|lk| lk.as_ref() == key.data());
+
+            if dominated {
+                let _ = self.inner.next();
+                continue;
+            }
+
+            if key.timestamp() <= self.snapshot_ts {
+                break;
+            }
+
+            self.last_key = Some(Bytes::copy_from_slice(key.data()));
+            let _ = self.inner.next();
+        }
+    }
+}
+
+impl<I: StorageIterator> StorageIterator for SnapshotIterator<I> {
+    fn key(&self) -> &Key {
+        self.inner.key()
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.inner.value()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.inner.is_valid()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.last_key = Some(Bytes::copy_from_slice(self.inner.key().data()));
+        self.inner.next()?;
+        self.advance_to_visible();
+        Ok(())
+    }
+}
