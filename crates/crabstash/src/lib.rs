@@ -148,17 +148,9 @@ impl<'a> Snapshot<'a> {
         start: Bound<K>,
         end: Bound<K>,
     ) -> Result<SnapshotDbIterator> {
-        let start: Bound<Vec<u8>> = match start {
-            Bound::Unbounded => Bound::Unbounded,
-            Bound::Included(k) => Bound::Included(k.as_ref().to_vec()),
-            Bound::Excluded(k) => Bound::Excluded(k.as_ref().to_vec()),
-        };
-        let end: Bound<Vec<u8>> = match end {
-            Bound::Unbounded => Bound::Unbounded,
-            Bound::Included(k) => Bound::Included(k.as_ref().to_vec()),
-            Bound::Excluded(k) => Bound::Excluded(k.as_ref().to_vec()),
-        };
-        let inner = self.storage.scan_at_ts(start, end, self.ts)?;
+        let inner = self
+            .storage
+            .scan_at_ts(bound_to_owned(start), bound_to_owned(end), self.ts)?;
         Ok(SnapshotDbIterator { inner })
     }
 
@@ -185,6 +177,14 @@ fn prefix_end_bound(prefix: &[u8]) -> Bound<Vec<u8>> {
         }
     }
     Bound::Unbounded
+}
+
+fn bound_to_owned<K: AsRef<[u8]>>(bound: Bound<K>) -> Bound<Vec<u8>> {
+    match bound {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(k) => Bound::Included(k.as_ref().to_vec()),
+        Bound::Excluded(k) => Bound::Excluded(k.as_ref().to_vec()),
+    }
 }
 
 pub struct Txn<'a> {
@@ -215,87 +215,53 @@ impl<'a> Txn<'a> {
     }
 }
 
-pub struct DbIterator {
-    inner: LsmIterator,
-}
-
-impl DbIterator {
-    pub fn key(&self) -> Option<&[u8]> {
-        self.inner.key()
-    }
-
-    pub fn value(&self) -> Option<&[u8]> {
-        self.inner.value().map(|b| b.as_ref())
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.inner.is_valid()
-    }
-
-    pub fn advance(&mut self) -> Result<()> {
-        self.inner.advance()
-    }
-}
-
-impl Iterator for DbIterator {
-    type Item = Result<(Vec<u8>, Vec<u8>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.inner.is_valid() {
-            return None;
+macro_rules! impl_db_iterator {
+    ($name:ident, $inner:ty) => {
+        pub struct $name {
+            inner: $inner,
         }
 
-        let key = self.inner.key()?.to_vec();
-        let value = self.inner.value()?.to_vec();
+        impl $name {
+            pub fn key(&self) -> Option<&[u8]> {
+                self.inner.key()
+            }
 
-        if let Err(e) = self.inner.advance() {
-            return Some(Err(e));
+            pub fn value(&self) -> Option<&[u8]> {
+                self.inner.value().map(|b| b.as_ref())
+            }
+
+            pub fn is_valid(&self) -> bool {
+                self.inner.is_valid()
+            }
+
+            pub fn advance(&mut self) -> Result<()> {
+                self.inner.advance()
+            }
         }
 
-        Some(Ok((key, value)))
-    }
-}
+        impl Iterator for $name {
+            type Item = Result<(Vec<u8>, Vec<u8>)>;
 
-pub struct SnapshotDbIterator {
-    inner: SnapshotLsmIterator,
-}
+            fn next(&mut self) -> Option<Self::Item> {
+                if !self.inner.is_valid() {
+                    return None;
+                }
 
-impl SnapshotDbIterator {
-    pub fn key(&self) -> Option<&[u8]> {
-        self.inner.key()
-    }
+                let key = self.inner.key()?.to_vec();
+                let value = self.inner.value()?.to_vec();
 
-    pub fn value(&self) -> Option<&[u8]> {
-        self.inner.value().map(|b| b.as_ref())
-    }
+                if let Err(e) = self.inner.advance() {
+                    return Some(Err(e));
+                }
 
-    pub fn is_valid(&self) -> bool {
-        self.inner.is_valid()
-    }
-
-    pub fn advance(&mut self) -> Result<()> {
-        self.inner.advance()
-    }
-}
-
-impl Iterator for SnapshotDbIterator {
-    type Item = Result<(Vec<u8>, Vec<u8>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.inner.is_valid() {
-            return None;
+                Some(Ok((key, value)))
+            }
         }
-
-        let key = self.inner.key()?.to_vec();
-        let value = self.inner.value()?.to_vec();
-
-        if let Err(e) = self.inner.advance() {
-            return Some(Err(e));
-        }
-
-        Some(Ok((key, value)))
-    }
+    };
 }
+
+impl_db_iterator!(DbIterator, LsmIterator);
+impl_db_iterator!(SnapshotDbIterator, SnapshotLsmIterator);
 
 #[cfg(test)]
 mod tests {
