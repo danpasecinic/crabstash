@@ -1,4 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabstash_common::simd::{bytes_equal, compare_bytes};
 use crabstash_common::{Error, Key, Result};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -171,7 +172,7 @@ impl SSTable {
 
     fn find_block(&self, key: &[u8]) -> usize {
         self.block_metas
-            .binary_search_by(|meta| meta.first_key.as_ref().cmp(key))
+            .binary_search_by(|meta| compare_bytes(meta.first_key.as_ref(), key))
             .unwrap_or_else(|idx| idx.saturating_sub(1))
     }
 
@@ -237,7 +238,7 @@ impl SSTable {
             let value_len = buf.get_u32_le() as usize;
             let is_tombstone = value_len == u32::MAX as usize;
 
-            if key == search_key {
+            if bytes_equal(key, search_key) {
                 if is_tombstone {
                     return Ok(None);
                 }

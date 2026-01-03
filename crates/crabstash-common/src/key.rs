@@ -1,3 +1,4 @@
+use crate::simd::compare_bytes;
 use bytes::Bytes;
 use std::cmp::Ordering;
 
@@ -29,8 +30,9 @@ impl Key {
 }
 
 impl Ord for Key {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.data.cmp(&other.data) {
+        match compare_bytes(&self.data, &other.data) {
             Ordering::Equal => other.timestamp.cmp(&self.timestamp),
             ord => ord,
         }
