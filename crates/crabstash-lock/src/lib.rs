@@ -148,7 +148,7 @@ pub struct RangeLockGuard {
     pub mode: LockMode,
 }
 
-fn bound_to_owned(bound: Bound<&[u8]>) -> Bound<Bytes> {
+pub fn bound_to_owned(bound: Bound<&[u8]>) -> Bound<Bytes> {
     match bound {
         Bound::Included(b) => Bound::Included(Bytes::copy_from_slice(b)),
         Bound::Excluded(b) => Bound::Excluded(Bytes::copy_from_slice(b)),

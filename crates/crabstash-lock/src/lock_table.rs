@@ -15,7 +15,7 @@ use crate::escalation::{
 use crate::lock_entry::LockEntry;
 use crate::lock_mode::LockMode;
 use crate::range_lock::{IntervalTree, RangeLockEntry};
-use crate::LockError;
+use crate::{bound_to_owned, LockError};
 
 #[derive(Debug, Clone)]
 pub struct LockConfig {
@@ -332,14 +332,6 @@ impl Drop for LockTable {
         if let Some(ref detector) = self.deadlock_detector {
             detector.stop();
         }
-    }
-}
-
-fn bound_to_owned(bound: Bound<&[u8]>) -> Bound<Bytes> {
-    match bound {
-        Bound::Included(b) => Bound::Included(Bytes::copy_from_slice(b)),
-        Bound::Excluded(b) => Bound::Excluded(Bytes::copy_from_slice(b)),
-        Bound::Unbounded => Bound::Unbounded,
     }
 }
 
