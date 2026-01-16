@@ -23,7 +23,7 @@ pub struct BloomFilter {
 
 impl BloomFilter {
     pub fn new() -> Self {
-        let num_words = (BLOOM_SIZE_BITS + 63) / 64;
+        let num_words = BLOOM_SIZE_BITS.div_ceil(64);
         let bits = (0..num_words).map(|_| AtomicU64::new(0)).collect();
         Self { bits }
     }

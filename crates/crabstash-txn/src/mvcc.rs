@@ -50,14 +50,16 @@ impl MvccEngine {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::Relaxed);
         let mut start_ts = self.ts_oracle.get_timestamp();
 
-        if isolation.is_deferrable() {
-            if let Some(safe_ts) = self
-                .ssi_manager
-                .wait_for_safe_snapshot(self.lock_timeout.as_millis() as u64)
-            {
-                start_ts = safe_ts;
-                debug!(txn_id, start_ts, "deferrable transaction got safe snapshot");
-            }
+        if let Some(safe_ts) = isolation
+            .is_deferrable()
+            .then(|| {
+                self.ssi_manager
+                    .wait_for_safe_snapshot(self.lock_timeout.as_millis() as u64)
+            })
+            .flatten()
+        {
+            start_ts = safe_ts;
+            debug!(txn_id, start_ts, "deferrable transaction got safe snapshot");
         }
 
         self.lock_manager.register_txn(txn_id, start_ts);
