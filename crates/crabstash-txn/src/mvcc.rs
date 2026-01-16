@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crabstash_common::{Error, Result};
 use crabstash_lock::LockError;
-use crabstash_lock::{LockConfig, LockManager, LockMode};
+use crabstash_lock::{LockConfig, LockManager, LockMode, SSIConflict, SSIManager};
 use crabstash_storage::{Lsm, LsmIterator};
 use parking_lot::Mutex;
 use std::ops::Bound;
@@ -20,6 +20,7 @@ pub struct MvccEngine {
     next_txn_id: AtomicU64,
     lock_manager: LockManager,
     lock_timeout: Duration,
+    ssi_manager: SSIManager,
 }
 
 impl MvccEngine {
@@ -36,6 +37,7 @@ impl MvccEngine {
             next_txn_id: AtomicU64::new(1),
             lock_manager: LockManager::new(lock_config),
             lock_timeout,
+            ssi_manager: SSIManager::new(),
         }
     }
 
@@ -48,6 +50,11 @@ impl MvccEngine {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::Relaxed);
         let start_ts = self.ts_oracle.get_timestamp();
         self.lock_manager.register_txn(txn_id, start_ts);
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager.begin_txn(txn_id);
+        }
+
         debug!(txn_id, start_ts, "transaction started");
         self.txn_manager.begin(txn_id, start_ts, isolation)
     }
@@ -67,6 +74,7 @@ impl MvccEngine {
             self.lock_manager
                 .lock_key(txn_id, key, LockMode::S, Some(self.lock_timeout))
                 .map_err(lock_error_to_common)?;
+            self.ssi_manager.record_read(txn_id, key);
         }
 
         let mut txn_guard = txn.lock();
@@ -87,11 +95,16 @@ impl MvccEngine {
 
         let txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
         drop(txn_guard);
 
         self.lock_manager
             .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
             .map_err(lock_error_to_common)?;
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager.record_write(txn_id, &key);
+        }
 
         let mut txn_guard = txn.lock();
         txn_guard.write_set.put(key, value);
@@ -103,11 +116,16 @@ impl MvccEngine {
 
         let txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
         drop(txn_guard);
 
         self.lock_manager
             .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
             .map_err(lock_error_to_common)?;
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager.record_write(txn_id, &key);
+        }
 
         let mut txn_guard = txn.lock();
         txn_guard.write_set.delete(key);
@@ -118,7 +136,15 @@ impl MvccEngine {
     pub fn commit(&self, txn: &Arc<Mutex<Transaction>>) -> Result<()> {
         let mut txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let start_ts = txn_guard.start_ts;
+        let isolation = txn_guard.isolation;
         let commit_ts = self.ts_oracle.get_timestamp();
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager
+                .validate_and_commit(txn_id, start_ts, commit_ts)
+                .map_err(ssi_error_to_common)?;
+        }
 
         self.txn_manager.prepare_commit(&mut txn_guard, commit_ts)?;
 
@@ -142,10 +168,14 @@ impl MvccEngine {
     pub fn abort(&self, txn: &Arc<Mutex<Transaction>>) {
         let mut txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
         debug!("transaction aborted");
         self.txn_manager.abort(&mut txn_guard);
         drop(txn_guard);
 
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager.abort_txn(txn_id);
+        }
         self.lock_manager.release_all(txn_id);
     }
 
@@ -176,5 +206,13 @@ fn lock_error_to_common(err: LockError) -> Error {
         | LockError::RangeLocksDisabled
         | LockError::NotHeld
         | LockError::InvalidUpgrade => Error::LockConflict,
+    }
+}
+
+fn ssi_error_to_common(err: SSIConflict) -> Error {
+    match err {
+        SSIConflict::WriteSkew { .. } => Error::WriteSkew,
+        SSIConflict::Phantom { .. } => Error::PhantomRead,
+        SSIConflict::TxnNotFound => Error::TransactionAborted,
     }
 }

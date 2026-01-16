@@ -13,6 +13,8 @@ pub enum Error {
     LockTimeout,
     Deadlock,
     LockConflict,
+    WriteSkew,
+    PhantomRead,
 }
 
 impl fmt::Display for Error {
@@ -27,6 +29,8 @@ impl fmt::Display for Error {
             Error::LockTimeout => write!(f, "Lock acquisition timed out"),
             Error::Deadlock => write!(f, "Deadlock detected"),
             Error::LockConflict => write!(f, "Lock conflict"),
+            Error::WriteSkew => write!(f, "Write skew detected (serializable violation)"),
+            Error::PhantomRead => write!(f, "Phantom read detected (serializable violation)"),
         }
     }
 }
