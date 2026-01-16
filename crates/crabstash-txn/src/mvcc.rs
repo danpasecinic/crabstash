@@ -48,14 +48,29 @@ impl MvccEngine {
     #[instrument(skip(self))]
     pub fn begin_with_isolation(&self, isolation: IsolationLevel) -> Arc<Mutex<Transaction>> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::Relaxed);
-        let start_ts = self.ts_oracle.get_timestamp();
-        self.lock_manager.register_txn(txn_id, start_ts);
+        let mut start_ts = self.ts_oracle.get_timestamp();
 
-        if isolation == IsolationLevel::Serializable {
-            self.ssi_manager.begin_txn_with_ts(txn_id, start_ts);
+        if isolation.is_deferrable() {
+            if let Some(safe_ts) = self
+                .ssi_manager
+                .wait_for_safe_snapshot(self.lock_timeout.as_millis() as u64)
+            {
+                start_ts = safe_ts;
+                debug!(txn_id, start_ts, "deferrable transaction got safe snapshot");
+            }
         }
 
-        debug!(txn_id, start_ts, "transaction started");
+        self.lock_manager.register_txn(txn_id, start_ts);
+
+        if isolation.is_serializable() {
+            if isolation.is_read_only() {
+                self.ssi_manager.begin_read_only_txn(txn_id, start_ts);
+            } else {
+                self.ssi_manager.begin_txn_with_ts(txn_id, start_ts);
+            }
+        }
+
+        debug!(txn_id, start_ts, ?isolation, "transaction started");
         self.txn_manager.begin(txn_id, start_ts, isolation)
     }
 
@@ -95,6 +110,12 @@ impl MvccEngine {
         let isolation = txn_guard.isolation;
         drop(txn_guard);
 
+        if isolation.is_read_only() {
+            return Err(
+                Error::InvalidArgument("cannot write in read-only transaction".into()).into(),
+            );
+        }
+
         self.lock_manager
             .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
             .map_err(lock_error_to_common)?;
@@ -116,6 +137,12 @@ impl MvccEngine {
         let isolation = txn_guard.isolation;
         drop(txn_guard);
 
+        if isolation.is_read_only() {
+            return Err(
+                Error::InvalidArgument("cannot delete in read-only transaction".into()).into(),
+            );
+        }
+
         self.lock_manager
             .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
             .map_err(lock_error_to_common)?;
@@ -136,6 +163,18 @@ impl MvccEngine {
         let start_ts = txn_guard.start_ts;
         let isolation = txn_guard.isolation;
         let commit_ts = self.ts_oracle.get_timestamp();
+
+        if isolation.is_read_only() {
+            self.txn_manager.commit(&mut txn_guard)?;
+            drop(txn_guard);
+
+            if isolation.is_serializable() {
+                self.ssi_manager.commit_read_only_txn(txn_id);
+            }
+            self.lock_manager.release_all(txn_id);
+            debug!(commit_ts, "read-only transaction committed");
+            return Ok(());
+        }
 
         if isolation == IsolationLevel::Serializable {
             self.ssi_manager
@@ -170,7 +209,7 @@ impl MvccEngine {
         self.txn_manager.abort(&mut txn_guard);
         drop(txn_guard);
 
-        if isolation == IsolationLevel::Serializable {
+        if isolation.is_serializable() {
             self.ssi_manager.abort_txn(txn_id);
         }
         self.lock_manager.release_all(txn_id);

@@ -150,10 +150,6 @@ impl TransactionManager {
         Ok(())
     }
 
-    pub fn is_read_only_txn(&self, txn: &Transaction) -> bool {
-        txn.isolation.is_read_only()
-    }
-
     fn validate_serializable(&self, txn: &Transaction, commit_ts: u64) -> Result<()> {
         let committed = self.committed_txns.lock();
 
