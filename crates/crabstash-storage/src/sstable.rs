@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabstash_common::simd::{bytes_equal, compare_bytes};
 use crabstash_common::{Error, Key, Result};
+use parking_lot::Mutex;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ pub struct BlockMeta {
 }
 
 pub struct SSTable {
-    file: File,
+    file: Mutex<File>,
     path: PathBuf,
     block_metas: Vec<BlockMeta>,
     bloom: BloomFilter,
@@ -92,7 +93,7 @@ impl SSTable {
             Self::decode_metadata(&meta_data)?;
 
         Ok(Self {
-            file: File::open(path.as_ref())?,
+            file: Mutex::new(File::open(path.as_ref())?),
             path: path.as_ref().to_path_buf(),
             block_metas,
             bloom,
@@ -152,7 +153,7 @@ impl SSTable {
         Ok((block_metas, bloom, compression, min_key, max_key))
     }
 
-    pub fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if !self.bloom.may_contain(key) {
             return Ok(None);
         }
@@ -176,7 +177,7 @@ impl SSTable {
             .unwrap_or_else(|idx| idx.saturating_sub(1))
     }
 
-    fn read_block(&mut self, idx: usize) -> Result<Bytes> {
+    fn read_block(&self, idx: usize) -> Result<Bytes> {
         let cache_key = BlockCacheKey::new(self.id, idx);
 
         if let Some(ref cache) = self.cache
@@ -194,15 +195,18 @@ impl SSTable {
         Ok(block)
     }
 
-    fn read_block_from_disk(&mut self, idx: usize) -> Result<Bytes> {
+    fn read_block_from_disk(&self, idx: usize) -> Result<Bytes> {
         let meta = &self.block_metas[idx];
-        self.file.seek(SeekFrom::Start(meta.offset))?;
+
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(meta.offset))?;
 
         let mut block = vec![0u8; meta.length as usize];
-        self.file.read_exact(&mut block)?;
+        file.read_exact(&mut block)?;
+        drop(file);
 
         let checksum_start = block.len() - 4;
-        let expected_checksum = u32::from_le_bytes(block[checksum_start..].try_into().unwrap());
+        let expected_checksum = u32::from_le_bytes(block[checksum_start..].try_into()?);
         let actual_checksum = crc32fast::hash(&block[..checksum_start]);
 
         if expected_checksum != actual_checksum {
@@ -282,7 +286,7 @@ impl SSTable {
         file.read_exact(&mut block)?;
 
         let checksum_start = block.len() - 4;
-        let expected = u32::from_le_bytes(block[checksum_start..].try_into().unwrap());
+        let expected = u32::from_le_bytes(block[checksum_start..].try_into()?);
         let actual = crc32fast::hash(&block[..checksum_start]);
 
         if expected != actual {
