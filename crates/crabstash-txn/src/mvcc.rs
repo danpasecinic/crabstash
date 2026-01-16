@@ -13,8 +13,6 @@ use tracing::{debug, instrument};
 use crate::timestamp::TimestampOracle;
 use crate::transaction::{IsolationLevel, Transaction, TransactionManager};
 
-const DEFAULT_LOCK_TIMEOUT_MS: u64 = 10_000;
-
 pub struct MvccEngine {
     storage: Arc<Lsm>,
     ts_oracle: TimestampOracle,
