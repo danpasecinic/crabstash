@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -11,40 +10,8 @@ use crate::lock_mode::LockMode;
 pub struct LockEntry {
     key: Bytes,
     holders: Mutex<HashMap<u64, LockMode>>,
-    wait_queue: Mutex<VecDeque<LockRequest>>,
+    wait_queue: Mutex<VecDeque<u64>>,
     condvar: Condvar,
-}
-
-pub struct LockRequest {
-    pub txn_id: u64,
-    pub mode: LockMode,
-    pub granted: AtomicBool,
-    pub enqueue_time: Instant,
-    pub is_upgrade: bool,
-}
-
-impl LockRequest {
-    pub fn new(txn_id: u64, mode: LockMode, is_upgrade: bool) -> Self {
-        Self {
-            txn_id,
-            mode,
-            granted: AtomicBool::new(false),
-            enqueue_time: Instant::now(),
-            is_upgrade,
-        }
-    }
-
-    pub fn is_granted(&self) -> bool {
-        self.granted.load(Ordering::Acquire)
-    }
-
-    pub fn grant(&self) {
-        self.granted.store(true, Ordering::Release);
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        self.enqueue_time.elapsed()
-    }
 }
 
 impl LockEntry {
@@ -88,10 +55,9 @@ impl LockEntry {
             return Ok(());
         }
 
-        let request = LockRequest::new(txn_id, mode, false);
         {
             let mut queue = self.wait_queue.lock();
-            queue.push_back(request);
+            queue.push_back(txn_id);
         }
 
         let deadline = timeout.map(|t| Instant::now() + t);
@@ -142,10 +108,9 @@ impl LockEntry {
             }
         }
 
-        let request = LockRequest::new(txn_id, target_mode, true);
         {
             let mut queue = self.wait_queue.lock();
-            queue.push_front(request);
+            queue.push_front(txn_id);
         }
 
         let deadline = timeout.map(|t| Instant::now() + t);
@@ -215,7 +180,7 @@ impl LockEntry {
     }
 
     pub fn get_waiters(&self) -> Vec<u64> {
-        self.wait_queue.lock().iter().map(|r| r.txn_id).collect()
+        self.wait_queue.lock().iter().copied().collect()
     }
 
     fn is_compatible_with_holders(
@@ -231,7 +196,7 @@ impl LockEntry {
 
     fn remove_from_queue(&self, txn_id: u64) {
         let mut queue = self.wait_queue.lock();
-        queue.retain(|r| r.txn_id != txn_id);
+        queue.retain(|&id| id != txn_id);
     }
 }
 

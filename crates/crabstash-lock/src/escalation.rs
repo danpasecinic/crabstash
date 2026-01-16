@@ -147,7 +147,10 @@ mod tests {
         assert_eq!(check_escalation(1000, &config), EscalationAction::Warn);
         assert_eq!(check_escalation(3000, &config), EscalationAction::Warn);
         assert_eq!(check_escalation(5000, &config), EscalationAction::Escalate);
-        assert_eq!(check_escalation(10000, &config), EscalationAction::ForceEscalate);
+        assert_eq!(
+            check_escalation(10000, &config),
+            EscalationAction::ForceEscalate
+        );
     }
 
     #[test]

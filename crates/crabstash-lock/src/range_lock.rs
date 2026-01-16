@@ -15,7 +15,12 @@ pub struct RangeLockEntry {
 
 impl RangeLockEntry {
     pub fn new(txn_id: u64, mode: LockMode, start: Bound<Bytes>, end: Bound<Bytes>) -> Self {
-        Self { txn_id, mode, start, end }
+        Self {
+            txn_id,
+            mode,
+            start,
+            end,
+        }
     }
 
     pub fn contains_key(&self, key: &[u8]) -> bool {
@@ -209,10 +214,18 @@ impl IntervalTree {
             (_, Bound::Unbounded) => Ordering::Greater,
             (Bound::Included(a), Bound::Included(b)) => a.cmp(b),
             (Bound::Included(a), Bound::Excluded(b)) => {
-                if a <= b { Ordering::Less } else { Ordering::Greater }
+                if a <= b {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
             }
             (Bound::Excluded(a), Bound::Included(b)) => {
-                if a < b { Ordering::Less } else { Ordering::Greater }
+                if a < b {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
             }
             (Bound::Excluded(a), Bound::Excluded(b)) => a.cmp(b),
         }
