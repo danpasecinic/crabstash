@@ -13,11 +13,9 @@ pub use lock_table::{LockConfig, LockTable};
 pub use range_lock::{IntervalTree, RangeLockEntry};
 
 use std::ops::Bound;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use parking_lot::Mutex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LockError {
@@ -99,7 +97,8 @@ impl LockManager {
         timeout: Option<Duration>,
     ) -> Result<RangeLockGuard, LockError> {
         let timeout = timeout.unwrap_or(Duration::from_millis(self.config.lock_timeout_ms));
-        self.lock_table.lock_range(txn_id, start, end, mode, Some(timeout))?;
+        self.lock_table
+            .lock_range(txn_id, start, end, mode, Some(timeout))?;
 
         Ok(RangeLockGuard {
             txn_id,
