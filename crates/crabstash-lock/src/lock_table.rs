@@ -1,7 +1,8 @@
 use std::ops::Bound;
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crossbeam_channel::Receiver;
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -10,12 +11,12 @@ use tracing::{debug, instrument};
 
 use crate::deadlock::{DeadlockDetector, WaitForGraph};
 use crate::escalation::{
-    check_escalation, handle_escalation_action, EscalationConfig, EscalationState,
+    EscalationConfig, EscalationState, check_escalation, handle_escalation_action,
 };
 use crate::lock_entry::LockEntry;
 use crate::lock_mode::LockMode;
 use crate::range_lock::{IntervalTree, RangeLockEntry};
-use crate::{bound_to_owned, LockError};
+use crate::{LockError, bound_to_owned};
 
 #[derive(Debug, Clone)]
 pub struct LockConfig {
@@ -73,7 +74,9 @@ impl LockTable {
     }
 
     pub fn register_txn(&self, txn_id: u64, start_ts: u64, priority: u32) {
-        self.waiter_graph.lock().register_txn(txn_id, start_ts, priority);
+        self.waiter_graph
+            .lock()
+            .register_txn(txn_id, start_ts, priority);
         self.escalation_state.insert(txn_id, EscalationState::new());
     }
 
@@ -97,11 +100,7 @@ impl LockTable {
             let conflicting = range_locks.find_containing_key(key);
             for range_entry in conflicting {
                 if range_entry.txn_id != txn_id && !mode.is_compatible(&range_entry.mode) {
-                    debug!(
-                        txn_id,
-                        holder = range_entry.txn_id,
-                        "blocked by range lock"
-                    );
+                    debug!(txn_id, holder = range_entry.txn_id, "blocked by range lock");
                     return Err(LockError::RangeConflict);
                 }
             }
@@ -166,11 +165,7 @@ impl LockTable {
 
             for entry in overlapping {
                 if entry.txn_id != txn_id && !mode.is_compatible(&entry.mode) {
-                    debug!(
-                        txn_id,
-                        holder = entry.txn_id,
-                        "range lock conflict"
-                    );
+                    debug!(txn_id, holder = entry.txn_id, "range lock conflict");
                     return Err(LockError::RangeConflict);
                 }
             }
@@ -267,12 +262,7 @@ impl LockTable {
         false
     }
 
-    pub fn check_range_conflict(
-        &self,
-        txn_id: u64,
-        key: &[u8],
-        mode: LockMode,
-    ) -> bool {
+    pub fn check_range_conflict(&self, txn_id: u64, key: &[u8], mode: LockMode) -> bool {
         if !self.config.enable_range_locks {
             return false;
         }
@@ -394,12 +384,7 @@ mod tests {
 
         table.lock_key(1, b"key1", LockMode::X, None).unwrap();
 
-        let result = table.lock_key(
-            2,
-            b"key1",
-            LockMode::S,
-            Some(Duration::from_millis(10)),
-        );
+        let result = table.lock_key(2, b"key1", LockMode::S, Some(Duration::from_millis(10)));
         assert!(matches!(result, Err(LockError::Timeout)));
     }
 
@@ -431,7 +416,9 @@ mod tests {
             table1.register_txn(1, 100, 0);
             for i in 0..100 {
                 let key = format!("key{}", i);
-                table1.lock_key(1, key.as_bytes(), LockMode::S, None).unwrap();
+                table1
+                    .lock_key(1, key.as_bytes(), LockMode::S, None)
+                    .unwrap();
             }
             table1.release_all(1);
         });
@@ -441,7 +428,9 @@ mod tests {
             table2.register_txn(2, 200, 0);
             for i in 100..200 {
                 let key = format!("key{}", i);
-                table2.lock_key(2, key.as_bytes(), LockMode::S, None).unwrap();
+                table2
+                    .lock_key(2, key.as_bytes(), LockMode::S, None)
+                    .unwrap();
             }
             table2.release_all(2);
         });

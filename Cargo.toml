@@ -22,14 +22,15 @@ crabstash-storage = { path = "crates/crabstash-storage" }
 crabstash-lock = { path = "crates/crabstash-lock" }
 crabstash-txn = { path = "crates/crabstash-txn" }
 
-bytes = "1.9"
-dashmap = "6.1"
-crossbeam-skiplist = "0.1"
-parking_lot = "0.12"
-crc32fast = "1.4"
-eyre = "0.6"
+bytes = "1.11.0"
+dashmap = "6.1.0"
+crossbeam-skiplist = "0.1.3"
+crossbeam-channel = "0.5.15"
+parking_lot = "0.12.5"
+crc32fast = "1.5.0"
+eyre = "0.6.12"
 lz4_flex = "0.12.0"
-moka = { version = "0.12", features = ["sync"] }
+moka = { version = "0.12.12", features = ["sync"] }
 wide = "1.1.1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

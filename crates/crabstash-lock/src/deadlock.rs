@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crossbeam_channel::{self as channel, Receiver, Sender};
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
@@ -197,7 +197,7 @@ pub struct DeadlockDetector {
     graph: std::sync::Arc<Mutex<WaitForGraph>>,
     shutdown: std::sync::Arc<AtomicBool>,
     check_interval: Duration,
-    abort_sender: Mutex<Option<mpsc::Sender<u64>>>,
+    abort_sender: Mutex<Option<Sender<u64>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -205,8 +205,8 @@ impl DeadlockDetector {
     pub fn new(
         graph: std::sync::Arc<Mutex<WaitForGraph>>,
         check_interval: Duration,
-    ) -> (Self, mpsc::Receiver<u64>) {
-        let (tx, rx) = mpsc::channel();
+    ) -> (Self, Receiver<u64>) {
+        let (tx, rx) = channel::unbounded();
         (
             Self {
                 graph,
