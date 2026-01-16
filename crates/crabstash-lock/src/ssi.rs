@@ -132,6 +132,7 @@ impl Default for ReadWriteSet {
 
 #[derive(Debug, Clone)]
 struct CommittedTxn {
+    #[allow(dead_code)]
     start_ts: u64,
     read_set: HashSet<u64>,
     write_set: HashSet<u64>,

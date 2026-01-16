@@ -52,7 +52,7 @@ impl MvccEngine {
         self.lock_manager.register_txn(txn_id, start_ts);
 
         if isolation == IsolationLevel::Serializable {
-            self.ssi_manager.begin_txn(txn_id);
+            self.ssi_manager.begin_txn_with_ts(txn_id, start_ts);
         }
 
         debug!(txn_id, start_ts, "transaction started");
