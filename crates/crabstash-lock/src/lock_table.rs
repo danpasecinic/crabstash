@@ -290,16 +290,16 @@ impl LockTable {
             let count = state.get_lock_count();
             let action = check_escalation(count, &self.config.escalation);
 
-            if handle_escalation_action(txn_id, action, &state) {
-                if let Some(range) = state.compute_bounding_range() {
-                    let _ = self.lock_range(
-                        txn_id,
-                        bound_ref(&range.0),
-                        bound_ref(&range.1),
-                        LockMode::X,
-                        None,
-                    );
-                }
+            if handle_escalation_action(txn_id, action, &state)
+                && let Some(range) = state.compute_bounding_range()
+            {
+                let _ = self.lock_range(
+                    txn_id,
+                    bound_ref(&range.0),
+                    bound_ref(&range.1),
+                    LockMode::X,
+                    None,
+                );
             }
         }
 

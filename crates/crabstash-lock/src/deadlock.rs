@@ -90,28 +90,15 @@ impl WaitForGraph {
     }
 
     pub fn detect_deadlock(&self) -> Option<Vec<u64>> {
-        let mut index_counter = 0;
-        let mut stack = Vec::new();
-        let mut indices: HashMap<u64, usize> = HashMap::new();
-        let mut lowlinks: HashMap<u64, usize> = HashMap::new();
-        let mut on_stack: HashSet<u64> = HashSet::new();
-        let mut sccs: Vec<Vec<u64>> = Vec::new();
+        let mut state = TarjanState::new();
 
         for &v in self.edges.keys() {
-            if !indices.contains_key(&v) {
-                self.strongconnect(
-                    v,
-                    &mut index_counter,
-                    &mut stack,
-                    &mut indices,
-                    &mut lowlinks,
-                    &mut on_stack,
-                    &mut sccs,
-                );
+            if !state.indices.contains_key(&v) {
+                self.strongconnect(v, &mut state);
             }
         }
 
-        for scc in sccs {
+        for scc in state.sccs {
             if scc.len() > 1 {
                 info!(?scc, "deadlock detected");
                 return Some(self.select_victims(&scc));
@@ -121,51 +108,42 @@ impl WaitForGraph {
         None
     }
 
-    fn strongconnect(
-        &self,
-        v: u64,
-        index_counter: &mut usize,
-        stack: &mut Vec<u64>,
-        indices: &mut HashMap<u64, usize>,
-        lowlinks: &mut HashMap<u64, usize>,
-        on_stack: &mut HashSet<u64>,
-        sccs: &mut Vec<Vec<u64>>,
-    ) {
-        indices.insert(v, *index_counter);
-        lowlinks.insert(v, *index_counter);
-        *index_counter += 1;
-        stack.push(v);
-        on_stack.insert(v);
+    fn strongconnect(&self, v: u64, state: &mut TarjanState) {
+        state.indices.insert(v, state.index_counter);
+        state.lowlinks.insert(v, state.index_counter);
+        state.index_counter += 1;
+        state.stack.push(v);
+        state.on_stack.insert(v);
 
         if let Some(successors) = self.edges.get(&v) {
             for &w in successors {
-                if !indices.contains_key(&w) {
-                    self.strongconnect(w, index_counter, stack, indices, lowlinks, on_stack, sccs);
-                    let low_w = *lowlinks.get(&w).unwrap();
-                    let low_v = lowlinks.get_mut(&v).unwrap();
+                if !state.indices.contains_key(&w) {
+                    self.strongconnect(w, state);
+                    let low_w = *state.lowlinks.get(&w).unwrap();
+                    let low_v = state.lowlinks.get_mut(&v).unwrap();
                     *low_v = (*low_v).min(low_w);
-                } else if on_stack.contains(&w) {
-                    let idx_w = *indices.get(&w).unwrap();
-                    let low_v = lowlinks.get_mut(&v).unwrap();
+                } else if state.on_stack.contains(&w) {
+                    let idx_w = *state.indices.get(&w).unwrap();
+                    let low_v = state.lowlinks.get_mut(&v).unwrap();
                     *low_v = (*low_v).min(idx_w);
                 }
             }
         }
 
-        let low_v = *lowlinks.get(&v).unwrap();
-        let idx_v = *indices.get(&v).unwrap();
+        let low_v = *state.lowlinks.get(&v).unwrap();
+        let idx_v = *state.indices.get(&v).unwrap();
 
         if low_v == idx_v {
             let mut scc = Vec::new();
             loop {
-                let w = stack.pop().unwrap();
-                on_stack.remove(&w);
+                let w = state.stack.pop().unwrap();
+                state.on_stack.remove(&w);
                 scc.push(w);
                 if w == v {
                     break;
                 }
             }
-            sccs.push(scc);
+            state.sccs.push(scc);
         }
     }
 
@@ -184,6 +162,28 @@ impl WaitForGraph {
         });
 
         vec![candidates.first().map(|(id, _)| *id).unwrap_or(cycle[0])]
+    }
+}
+
+struct TarjanState {
+    index_counter: usize,
+    stack: Vec<u64>,
+    indices: HashMap<u64, usize>,
+    lowlinks: HashMap<u64, usize>,
+    on_stack: HashSet<u64>,
+    sccs: Vec<Vec<u64>>,
+}
+
+impl TarjanState {
+    fn new() -> Self {
+        Self {
+            index_counter: 0,
+            stack: Vec::new(),
+            indices: HashMap::new(),
+            lowlinks: HashMap::new(),
+            on_stack: HashSet::new(),
+            sccs: Vec::new(),
+        }
     }
 }
 

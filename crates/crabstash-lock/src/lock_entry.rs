@@ -31,10 +31,10 @@ impl LockEntry {
     pub fn try_acquire(&self, txn_id: u64, mode: LockMode) -> bool {
         let mut holders = self.holders.lock();
 
-        if let Some(&held_mode) = holders.get(&txn_id) {
-            if held_mode == mode || !held_mode.can_upgrade_to(&mode) {
-                return true;
-            }
+        if let Some(&held_mode) = holders.get(&txn_id)
+            && (held_mode == mode || !held_mode.can_upgrade_to(&mode))
+        {
+            return true;
         }
 
         if self.is_compatible_with_holders(&holders, txn_id, mode) {

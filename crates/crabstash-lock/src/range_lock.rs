@@ -162,10 +162,10 @@ impl IntervalTree {
             results.push(&node.entry);
         }
 
-        if !Self::bound_greater_than(&node.entry.start, end) {
-            if let Some(right_idx) = node.right {
-                self.find_overlapping_recursive(right_idx, start, end, results);
-            }
+        if !Self::bound_greater_than(&node.entry.start, end)
+            && let Some(right_idx) = node.right
+        {
+            self.find_overlapping_recursive(right_idx, start, end, results);
         }
     }
 
