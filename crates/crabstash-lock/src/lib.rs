@@ -4,6 +4,7 @@ mod lock_entry;
 mod lock_mode;
 mod lock_table;
 mod range_lock;
+mod ssi;
 
 pub use deadlock::{DeadlockDetector, WaitForGraph};
 pub use escalation::{EscalationConfig, EscalationState};
