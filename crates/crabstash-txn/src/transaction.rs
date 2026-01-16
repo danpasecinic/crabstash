@@ -8,6 +8,30 @@ use std::sync::Arc;
 pub enum IsolationLevel {
     Snapshot,
     Serializable,
+    SerializableReadOnly,
+    SerializableDeferrable,
+}
+
+impl IsolationLevel {
+    pub fn is_serializable(self) -> bool {
+        matches!(
+            self,
+            IsolationLevel::Serializable
+                | IsolationLevel::SerializableReadOnly
+                | IsolationLevel::SerializableDeferrable
+        )
+    }
+
+    pub fn is_read_only(self) -> bool {
+        matches!(
+            self,
+            IsolationLevel::SerializableReadOnly | IsolationLevel::SerializableDeferrable
+        )
+    }
+
+    pub fn is_deferrable(self) -> bool {
+        matches!(self, IsolationLevel::SerializableDeferrable)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,7 +104,7 @@ impl Transaction {
     }
 
     pub fn record_read(&mut self, key: Bytes) {
-        if self.isolation == IsolationLevel::Serializable {
+        if self.isolation.is_serializable() && !self.isolation.is_read_only() {
             self.read_set.insert(key);
         }
     }

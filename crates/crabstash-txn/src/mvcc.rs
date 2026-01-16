@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crabstash_common::{Error, Result};
 use crabstash_lock::LockError;
-use crabstash_lock::{LockConfig, LockManager, LockMode};
+use crabstash_lock::{LockConfig, LockManager, LockMode, SSIConflict, SSIManager};
 use crabstash_storage::{Lsm, LsmIterator};
 use parking_lot::Mutex;
 use std::ops::Bound;
@@ -20,6 +20,7 @@ pub struct MvccEngine {
     next_txn_id: AtomicU64,
     lock_manager: LockManager,
     lock_timeout: Duration,
+    ssi_manager: SSIManager,
 }
 
 impl MvccEngine {
@@ -36,6 +37,7 @@ impl MvccEngine {
             next_txn_id: AtomicU64::new(1),
             lock_manager: LockManager::new(lock_config),
             lock_timeout,
+            ssi_manager: SSIManager::new(),
         }
     }
 
@@ -46,9 +48,31 @@ impl MvccEngine {
     #[instrument(skip(self))]
     pub fn begin_with_isolation(&self, isolation: IsolationLevel) -> Arc<Mutex<Transaction>> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::Relaxed);
-        let start_ts = self.ts_oracle.get_timestamp();
+        let mut start_ts = self.ts_oracle.get_timestamp();
+
+        if let Some(safe_ts) = isolation
+            .is_deferrable()
+            .then(|| {
+                self.ssi_manager
+                    .wait_for_safe_snapshot(self.lock_timeout.as_millis() as u64)
+            })
+            .flatten()
+        {
+            start_ts = safe_ts;
+            debug!(txn_id, start_ts, "deferrable transaction got safe snapshot");
+        }
+
         self.lock_manager.register_txn(txn_id, start_ts);
-        debug!(txn_id, start_ts, "transaction started");
+
+        if isolation.is_serializable() {
+            if isolation.is_read_only() {
+                self.ssi_manager.begin_read_only_txn(txn_id, start_ts);
+            } else {
+                self.ssi_manager.begin_txn_with_ts(txn_id, start_ts);
+            }
+        }
+
+        debug!(txn_id, start_ts, ?isolation, "transaction started");
         self.txn_manager.begin(txn_id, start_ts, isolation)
     }
 
@@ -64,9 +88,7 @@ impl MvccEngine {
         drop(txn_guard);
 
         if isolation == IsolationLevel::Serializable {
-            self.lock_manager
-                .lock_key(txn_id, key, LockMode::S, Some(self.lock_timeout))
-                .map_err(lock_error_to_common)?;
+            self.ssi_manager.record_read(txn_id, key);
         }
 
         let mut txn_guard = txn.lock();
@@ -87,11 +109,22 @@ impl MvccEngine {
 
         let txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
         drop(txn_guard);
+
+        if isolation.is_read_only() {
+            return Err(
+                Error::InvalidArgument("cannot write in read-only transaction".into()).into(),
+            );
+        }
 
         self.lock_manager
             .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
             .map_err(lock_error_to_common)?;
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager.record_write(txn_id, &key);
+        }
 
         let mut txn_guard = txn.lock();
         txn_guard.write_set.put(key, value);
@@ -103,11 +136,22 @@ impl MvccEngine {
 
         let txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
         drop(txn_guard);
+
+        if isolation.is_read_only() {
+            return Err(
+                Error::InvalidArgument("cannot delete in read-only transaction".into()).into(),
+            );
+        }
 
         self.lock_manager
             .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
             .map_err(lock_error_to_common)?;
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager.record_write(txn_id, &key);
+        }
 
         let mut txn_guard = txn.lock();
         txn_guard.write_set.delete(key);
@@ -118,7 +162,27 @@ impl MvccEngine {
     pub fn commit(&self, txn: &Arc<Mutex<Transaction>>) -> Result<()> {
         let mut txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let start_ts = txn_guard.start_ts;
+        let isolation = txn_guard.isolation;
         let commit_ts = self.ts_oracle.get_timestamp();
+
+        if isolation.is_read_only() {
+            self.txn_manager.commit(&mut txn_guard)?;
+            drop(txn_guard);
+
+            if isolation.is_serializable() {
+                self.ssi_manager.commit_read_only_txn(txn_id);
+            }
+            self.lock_manager.release_all(txn_id);
+            debug!(commit_ts, "read-only transaction committed");
+            return Ok(());
+        }
+
+        if isolation == IsolationLevel::Serializable {
+            self.ssi_manager
+                .validate_and_commit(txn_id, start_ts, commit_ts)
+                .map_err(ssi_error_to_common)?;
+        }
 
         self.txn_manager.prepare_commit(&mut txn_guard, commit_ts)?;
 
@@ -142,10 +206,14 @@ impl MvccEngine {
     pub fn abort(&self, txn: &Arc<Mutex<Transaction>>) {
         let mut txn_guard = txn.lock();
         let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
         debug!("transaction aborted");
         self.txn_manager.abort(&mut txn_guard);
         drop(txn_guard);
 
+        if isolation.is_serializable() {
+            self.ssi_manager.abort_txn(txn_id);
+        }
         self.lock_manager.release_all(txn_id);
     }
 
@@ -176,5 +244,119 @@ fn lock_error_to_common(err: LockError) -> Error {
         | LockError::RangeLocksDisabled
         | LockError::NotHeld
         | LockError::InvalidUpgrade => Error::LockConflict,
+    }
+}
+
+fn ssi_error_to_common(err: SSIConflict) -> Error {
+    match err {
+        SSIConflict::WriteSkew { .. } => Error::WriteSkew,
+        SSIConflict::Phantom { .. } => Error::PhantomRead,
+        SSIConflict::DangerousStructure { .. } => Error::SerializableConflict,
+        SSIConflict::TxnNotFound => Error::TransactionAborted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabstash_storage::LsmOptions;
+
+    fn create_test_engine() -> MvccEngine {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Lsm::open(dir.path(), LsmOptions::default()).unwrap());
+        MvccEngine::new(storage)
+    }
+
+    #[test]
+    fn test_serializable_write_skew_detection() {
+        let engine = create_test_engine();
+
+        let setup_txn = engine.begin();
+        engine.put(&setup_txn, "account_a", "100").unwrap();
+        engine.put(&setup_txn, "account_b", "100").unwrap();
+        engine.commit(&setup_txn).unwrap();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+
+        engine.get(&txn1, b"account_a").unwrap();
+        engine.get(&txn1, b"account_b").unwrap();
+        engine.get(&txn2, b"account_a").unwrap();
+        engine.get(&txn2, b"account_b").unwrap();
+
+        engine.put(&txn1, "account_a", "0").unwrap();
+        engine.put(&txn2, "account_b", "0").unwrap();
+
+        engine.commit(&txn1).unwrap();
+        let result = engine.commit(&txn2);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write skew"));
+    }
+
+    #[test]
+    fn test_serializable_no_conflict_disjoint() {
+        let engine = create_test_engine();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+
+        engine.put(&txn1, "key_a", "value_a").unwrap();
+        engine.put(&txn2, "key_b", "value_b").unwrap();
+
+        engine.commit(&txn1).unwrap();
+        engine.commit(&txn2).unwrap();
+    }
+
+    #[test]
+    fn test_serializable_sequential_commits() {
+        let engine = create_test_engine();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.put(&txn1, "key", "value1").unwrap();
+        engine.commit(&txn1).unwrap();
+
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.get(&txn2, b"key").unwrap();
+        engine.put(&txn2, "key", "value2").unwrap();
+        engine.commit(&txn2).unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_isolation_allows_write_skew() {
+        let engine = create_test_engine();
+
+        let setup_txn = engine.begin();
+        engine.put(&setup_txn, "account_a", "100").unwrap();
+        engine.put(&setup_txn, "account_b", "100").unwrap();
+        engine.commit(&setup_txn).unwrap();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Snapshot);
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Snapshot);
+
+        engine.get(&txn1, b"account_a").unwrap();
+        engine.get(&txn1, b"account_b").unwrap();
+        engine.get(&txn2, b"account_a").unwrap();
+        engine.get(&txn2, b"account_b").unwrap();
+
+        engine.put(&txn1, "account_a", "0").unwrap();
+        engine.put(&txn2, "account_b", "0").unwrap();
+
+        engine.commit(&txn1).unwrap();
+        engine.commit(&txn2).unwrap();
+    }
+
+    #[test]
+    fn test_abort_cleans_up_ssi_state() {
+        let engine = create_test_engine();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.put(&txn1, "key", "value").unwrap();
+        engine.abort(&txn1);
+
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.put(&txn2, "key", "value2").unwrap();
+        engine.commit(&txn2).unwrap();
     }
 }

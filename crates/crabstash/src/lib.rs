@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crabstash_common::Result;
 use crabstash_storage::{Lsm, LsmOptions, SnapshotLsmIterator};
-use crabstash_txn::{IsolationLevel, LsmIterator, MvccEngine, Transaction};
+use crabstash_txn::{LsmIterator, MvccEngine, Transaction};
 use parking_lot::Mutex;
 use std::ops::Bound;
 use std::path::Path;
@@ -79,12 +79,8 @@ impl Db {
     }
 
     pub fn begin_with_isolation(&self, isolation: Isolation) -> Txn<'_> {
-        let level = match isolation {
-            Isolation::Snapshot => IsolationLevel::Snapshot,
-            Isolation::Serializable => IsolationLevel::Serializable,
-        };
         Txn {
-            inner: self.engine.begin_with_isolation(level),
+            inner: self.engine.begin_with_isolation(isolation),
             engine: &self.engine,
         }
     }

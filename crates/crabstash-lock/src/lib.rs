@@ -4,6 +4,7 @@ mod lock_entry;
 mod lock_mode;
 mod lock_table;
 mod range_lock;
+mod ssi;
 
 pub use deadlock::{DeadlockDetector, WaitForGraph};
 pub use escalation::{EscalationConfig, EscalationState};
@@ -11,6 +12,10 @@ pub use lock_entry::LockEntry;
 pub use lock_mode::LockMode;
 pub use lock_table::{LockConfig, LockTable};
 pub use range_lock::{IntervalTree, RangeLockEntry};
+pub use ssi::{
+    BloomFilter, ConflictType, RWConflict, ReadWriteSet, SSIConflict, SSIManager, SSIStats,
+    SSIStatsSnapshot,
+};
 
 use std::ops::Bound;
 use std::time::Duration;
