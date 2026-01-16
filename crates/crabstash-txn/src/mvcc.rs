@@ -71,9 +71,6 @@ impl MvccEngine {
         drop(txn_guard);
 
         if isolation == IsolationLevel::Serializable {
-            self.lock_manager
-                .lock_key(txn_id, key, LockMode::S, Some(self.lock_timeout))
-                .map_err(lock_error_to_common)?;
             self.ssi_manager.record_read(txn_id, key);
         }
 
@@ -214,5 +211,110 @@ fn ssi_error_to_common(err: SSIConflict) -> Error {
         SSIConflict::WriteSkew { .. } => Error::WriteSkew,
         SSIConflict::Phantom { .. } => Error::PhantomRead,
         SSIConflict::TxnNotFound => Error::TransactionAborted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabstash_storage::LsmOptions;
+
+    fn create_test_engine() -> MvccEngine {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Lsm::open(dir.path(), LsmOptions::default()).unwrap());
+        MvccEngine::new(storage)
+    }
+
+    #[test]
+    fn test_serializable_write_skew_detection() {
+        let engine = create_test_engine();
+
+        let setup_txn = engine.begin();
+        engine.put(&setup_txn, "account_a", "100").unwrap();
+        engine.put(&setup_txn, "account_b", "100").unwrap();
+        engine.commit(&setup_txn).unwrap();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+
+        engine.get(&txn1, b"account_a").unwrap();
+        engine.get(&txn1, b"account_b").unwrap();
+        engine.get(&txn2, b"account_a").unwrap();
+        engine.get(&txn2, b"account_b").unwrap();
+
+        engine.put(&txn1, "account_a", "0").unwrap();
+        engine.put(&txn2, "account_b", "0").unwrap();
+
+        engine.commit(&txn1).unwrap();
+        let result = engine.commit(&txn2);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Write skew"));
+    }
+
+    #[test]
+    fn test_serializable_no_conflict_disjoint() {
+        let engine = create_test_engine();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+
+        engine.put(&txn1, "key_a", "value_a").unwrap();
+        engine.put(&txn2, "key_b", "value_b").unwrap();
+
+        engine.commit(&txn1).unwrap();
+        engine.commit(&txn2).unwrap();
+    }
+
+    #[test]
+    fn test_serializable_sequential_commits() {
+        let engine = create_test_engine();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.put(&txn1, "key", "value1").unwrap();
+        engine.commit(&txn1).unwrap();
+
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.get(&txn2, b"key").unwrap();
+        engine.put(&txn2, "key", "value2").unwrap();
+        engine.commit(&txn2).unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_isolation_allows_write_skew() {
+        let engine = create_test_engine();
+
+        let setup_txn = engine.begin();
+        engine.put(&setup_txn, "account_a", "100").unwrap();
+        engine.put(&setup_txn, "account_b", "100").unwrap();
+        engine.commit(&setup_txn).unwrap();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Snapshot);
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Snapshot);
+
+        engine.get(&txn1, b"account_a").unwrap();
+        engine.get(&txn1, b"account_b").unwrap();
+        engine.get(&txn2, b"account_a").unwrap();
+        engine.get(&txn2, b"account_b").unwrap();
+
+        engine.put(&txn1, "account_a", "0").unwrap();
+        engine.put(&txn2, "account_b", "0").unwrap();
+
+        engine.commit(&txn1).unwrap();
+        engine.commit(&txn2).unwrap();
+    }
+
+    #[test]
+    fn test_abort_cleans_up_ssi_state() {
+        let engine = create_test_engine();
+
+        let txn1 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.put(&txn1, "key", "value").unwrap();
+        engine.abort(&txn1);
+
+        let txn2 = engine.begin_with_isolation(IsolationLevel::Serializable);
+        engine.put(&txn2, "key", "value2").unwrap();
+        engine.commit(&txn2).unwrap();
     }
 }
