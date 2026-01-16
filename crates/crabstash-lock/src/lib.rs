@@ -12,6 +12,7 @@ pub use lock_entry::LockEntry;
 pub use lock_mode::LockMode;
 pub use lock_table::{LockConfig, LockTable};
 pub use range_lock::{IntervalTree, RangeLockEntry};
+pub use ssi::{ReadWriteSet, SSIConflict, SSIManager};
 
 use std::ops::Bound;
 use std::time::Duration;

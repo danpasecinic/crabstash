@@ -13,9 +13,6 @@ fn hash_key(key: &[u8]) -> u64 {
     rapidhash(key)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TxnId(pub u64);
-
 #[derive(Debug, Clone)]
 pub struct ReadWriteSet {
     read_keys: HashSet<u64>,
@@ -82,7 +79,6 @@ impl Default for ReadWriteSet {
 
 #[derive(Debug, Clone)]
 struct CommittedTxn {
-    commit_ts: u64,
     write_set: HashSet<u64>,
 }
 
@@ -136,11 +132,12 @@ impl SSIManager {
     ) -> Result<(), SSIConflict> {
         let _commit_guard = self.commit_lock.lock();
 
-        let rw_set = self
+        let rw_set_arc = self
             .active_txns
             .get(&txn_id)
+            .map(|r| r.clone())
             .ok_or(SSIConflict::TxnNotFound)?;
-        let rw_set = rw_set.lock();
+        let rw_set = rw_set_arc.lock();
 
         let committed = self.committed_txns.read();
         for (&ts, committed_txn) in committed.iter() {
@@ -155,9 +152,11 @@ impl SSIManager {
                 }
 
                 for write_hash in &committed_txn.write_set {
-                    if rw_set.read_ranges.iter().any(|(start, end)| {
-                        self.hash_in_range(*write_hash, start, end)
-                    }) {
+                    if rw_set
+                        .read_ranges
+                        .iter()
+                        .any(|(start, end)| self.hash_in_range(*write_hash, start, end))
+                    {
                         warn!(
                             txn_id,
                             conflicting_ts = ts,
@@ -173,13 +172,9 @@ impl SSIManager {
         let write_set = rw_set.write_set().clone();
         drop(rw_set);
 
-        self.committed_txns.write().insert(
-            commit_ts,
-            CommittedTxn {
-                commit_ts,
-                write_set,
-            },
-        );
+        self.committed_txns
+            .write()
+            .insert(commit_ts, CommittedTxn { write_set });
 
         self.active_txns.remove(&txn_id);
         debug!(txn_id, commit_ts, "SSI: transaction committed");
