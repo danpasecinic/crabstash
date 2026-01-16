@@ -1,10 +1,13 @@
 use bytes::Bytes;
-use crabstash_common::Result;
+use crabstash_common::{Error, Result};
+use crabstash_lock::LockError;
+use crabstash_lock::{LockConfig, LockManager, LockMode};
 use crabstash_storage::{Lsm, LsmIterator};
 use parking_lot::Mutex;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tracing::{debug, instrument};
 
 use crate::timestamp::TimestampOracle;
@@ -15,15 +18,24 @@ pub struct MvccEngine {
     ts_oracle: TimestampOracle,
     txn_manager: TransactionManager,
     next_txn_id: AtomicU64,
+    lock_manager: LockManager,
+    lock_timeout: Duration,
 }
 
 impl MvccEngine {
     pub fn new(storage: Arc<Lsm>) -> Self {
+        Self::with_lock_config(storage, LockConfig::default())
+    }
+
+    pub fn with_lock_config(storage: Arc<Lsm>, lock_config: LockConfig) -> Self {
+        let lock_timeout = Duration::from_millis(lock_config.lock_timeout_ms);
         Self {
             storage,
             ts_oracle: TimestampOracle::new(),
             txn_manager: TransactionManager::new(),
             next_txn_id: AtomicU64::new(1),
+            lock_manager: LockManager::new(lock_config),
+            lock_timeout,
         }
     }
 
@@ -35,18 +47,29 @@ impl MvccEngine {
     pub fn begin_with_isolation(&self, isolation: IsolationLevel) -> Arc<Mutex<Transaction>> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::Relaxed);
         let start_ts = self.ts_oracle.get_timestamp();
+        self.lock_manager.register_txn(txn_id, start_ts);
         debug!(txn_id, start_ts, "transaction started");
         self.txn_manager.begin(txn_id, start_ts, isolation)
     }
 
     pub fn get(&self, txn: &Arc<Mutex<Transaction>>, key: &[u8]) -> Result<Option<Bytes>> {
-        let mut txn_guard = txn.lock();
+        let txn_guard = txn.lock();
+        let txn_id = txn_guard.id;
+        let isolation = txn_guard.isolation;
+        let start_ts = txn_guard.start_ts;
 
         if let Some(local_value) = txn_guard.write_set.get(key) {
             return Ok(local_value.cloned());
         }
+        drop(txn_guard);
 
-        let start_ts = txn_guard.start_ts;
+        if isolation == IsolationLevel::Serializable {
+            self.lock_manager
+                .lock_key(txn_id, key, LockMode::S, Some(self.lock_timeout))
+                .map_err(lock_error_to_common)?;
+        }
+
+        let mut txn_guard = txn.lock();
         txn_guard.record_read(Bytes::copy_from_slice(key));
         drop(txn_guard);
 
@@ -58,19 +81,43 @@ impl MvccEngine {
         txn: &Arc<Mutex<Transaction>>,
         key: impl Into<Bytes>,
         value: impl Into<Bytes>,
-    ) {
+    ) -> Result<()> {
+        let key = key.into();
+        let value = value.into();
+
+        let txn_guard = txn.lock();
+        let txn_id = txn_guard.id;
+        drop(txn_guard);
+
+        self.lock_manager
+            .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
+            .map_err(lock_error_to_common)?;
+
         let mut txn_guard = txn.lock();
-        txn_guard.write_set.put(key.into(), value.into());
+        txn_guard.write_set.put(key, value);
+        Ok(())
     }
 
-    pub fn delete(&self, txn: &Arc<Mutex<Transaction>>, key: impl Into<Bytes>) {
+    pub fn delete(&self, txn: &Arc<Mutex<Transaction>>, key: impl Into<Bytes>) -> Result<()> {
+        let key = key.into();
+
+        let txn_guard = txn.lock();
+        let txn_id = txn_guard.id;
+        drop(txn_guard);
+
+        self.lock_manager
+            .lock_key(txn_id, &key, LockMode::X, Some(self.lock_timeout))
+            .map_err(lock_error_to_common)?;
+
         let mut txn_guard = txn.lock();
-        txn_guard.write_set.delete(key.into());
+        txn_guard.write_set.delete(key);
+        Ok(())
     }
 
     #[instrument(skip(self, txn))]
     pub fn commit(&self, txn: &Arc<Mutex<Transaction>>) -> Result<()> {
         let mut txn_guard = txn.lock();
+        let txn_id = txn_guard.id;
         let commit_ts = self.ts_oracle.get_timestamp();
 
         self.txn_manager.prepare_commit(&mut txn_guard, commit_ts)?;
@@ -84,6 +131,9 @@ impl MvccEngine {
         }
 
         self.txn_manager.commit(&mut txn_guard)?;
+        drop(txn_guard);
+
+        self.lock_manager.release_all(txn_id);
         debug!(commit_ts, "transaction committed");
         Ok(())
     }
@@ -91,8 +141,12 @@ impl MvccEngine {
     #[instrument(skip(self, txn))]
     pub fn abort(&self, txn: &Arc<Mutex<Transaction>>) {
         let mut txn_guard = txn.lock();
+        let txn_id = txn_guard.id;
         debug!("transaction aborted");
         self.txn_manager.abort(&mut txn_guard);
+        drop(txn_guard);
+
+        self.lock_manager.release_all(txn_id);
     }
 
     pub fn storage(&self) -> &Arc<Lsm> {
@@ -109,5 +163,18 @@ impl MvccEngine {
         end: Bound<K>,
     ) -> Result<LsmIterator> {
         self.storage.scan_range(start, end)
+    }
+}
+
+fn lock_error_to_common(err: LockError) -> Error {
+    match err {
+        LockError::Timeout => Error::LockTimeout,
+        LockError::Deadlock => Error::Deadlock,
+        LockError::TransactionAborted => Error::TransactionAborted,
+        LockError::LockEscalationFailed
+        | LockError::RangeConflict
+        | LockError::RangeLocksDisabled
+        | LockError::NotHeld
+        | LockError::InvalidUpgrade => Error::LockConflict,
     }
 }

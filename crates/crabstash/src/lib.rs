@@ -61,13 +61,13 @@ impl Db {
 
     pub fn put(&self, key: impl Into<Bytes>, value: impl Into<Bytes>) -> Result<()> {
         let txn = self.engine.begin();
-        self.engine.put(&txn, key, value);
+        self.engine.put(&txn, key, value)?;
         self.engine.commit(&txn)
     }
 
     pub fn delete(&self, key: impl Into<Bytes>) -> Result<()> {
         let txn = self.engine.begin();
-        self.engine.delete(&txn, key);
+        self.engine.delete(&txn, key)?;
         self.engine.commit(&txn)
     }
 
@@ -199,11 +199,11 @@ impl<'a> Txn<'a> {
     }
 
     pub fn put(&self, key: impl Into<Bytes>, value: impl Into<Bytes>) {
-        self.engine.put(&self.inner, key, value);
+        self.engine.put(&self.inner, key, value).unwrap();
     }
 
     pub fn delete(&self, key: impl Into<Bytes>) {
-        self.engine.delete(&self.inner, key);
+        self.engine.delete(&self.inner, key).unwrap();
     }
 
     pub fn commit(self) -> Result<()> {

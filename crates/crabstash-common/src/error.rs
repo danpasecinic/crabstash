@@ -10,6 +10,9 @@ pub enum Error {
     TransactionConflict,
     TransactionAborted,
     InvalidArgument(String),
+    LockTimeout,
+    Deadlock,
+    LockConflict,
 }
 
 impl fmt::Display for Error {
@@ -21,6 +24,9 @@ impl fmt::Display for Error {
             Error::TransactionConflict => write!(f, "Transaction conflict"),
             Error::TransactionAborted => write!(f, "Transaction aborted"),
             Error::InvalidArgument(msg) => write!(f, "Invalid argument: {msg}"),
+            Error::LockTimeout => write!(f, "Lock acquisition timed out"),
+            Error::Deadlock => write!(f, "Deadlock detected"),
+            Error::LockConflict => write!(f, "Lock conflict"),
         }
     }
 }
