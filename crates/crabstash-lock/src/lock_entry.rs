@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use parking_lot::{Condvar, Mutex};
 
-use crate::lock_mode::LockMode;
 use crate::LockError;
+use crate::lock_mode::LockMode;
 
 pub struct LockEntry {
     key: Bytes,
@@ -105,21 +105,19 @@ impl LockEntry {
                 return Ok(());
             }
 
-            let wait_result = if let Some(deadline) = deadline {
+            if let Some(deadline) = deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     self.remove_from_queue(txn_id);
                     return Err(LockError::Timeout);
                 }
-                self.condvar.wait_for(&mut holders, remaining)
+                let wait_result = self.condvar.wait_for(&mut holders, remaining);
+                if wait_result.timed_out() {
+                    self.remove_from_queue(txn_id);
+                    return Err(LockError::Timeout);
+                }
             } else {
                 self.condvar.wait(&mut holders);
-                parking_lot::WaitTimeoutResult::new(false)
-            };
-
-            if wait_result.timed_out() {
-                self.remove_from_queue(txn_id);
-                return Err(LockError::Timeout);
             }
         }
     }
@@ -155,9 +153,9 @@ impl LockEntry {
         loop {
             let mut holders = self.holders.lock();
 
-            let can_upgrade = holders.iter().all(|(&id, mode)| {
-                id == txn_id || mode.is_compatible(&target_mode)
-            });
+            let can_upgrade = holders
+                .iter()
+                .all(|(&id, mode)| id == txn_id || mode.is_compatible(&target_mode));
 
             if can_upgrade {
                 holders.insert(txn_id, target_mode);
@@ -165,21 +163,19 @@ impl LockEntry {
                 return Ok(());
             }
 
-            let wait_result = if let Some(deadline) = deadline {
+            if let Some(deadline) = deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     self.remove_from_queue(txn_id);
                     return Err(LockError::Timeout);
                 }
-                self.condvar.wait_for(&mut holders, remaining)
+                let wait_result = self.condvar.wait_for(&mut holders, remaining);
+                if wait_result.timed_out() {
+                    self.remove_from_queue(txn_id);
+                    return Err(LockError::Timeout);
+                }
             } else {
                 self.condvar.wait(&mut holders);
-                parking_lot::WaitTimeoutResult::new(false)
-            };
-
-            if wait_result.timed_out() {
-                self.remove_from_queue(txn_id);
-                return Err(LockError::Timeout);
             }
         }
     }
@@ -211,7 +207,11 @@ impl LockEntry {
     }
 
     pub fn get_holders(&self) -> Vec<(u64, LockMode)> {
-        self.holders.lock().iter().map(|(&id, &mode)| (id, mode)).collect()
+        self.holders
+            .lock()
+            .iter()
+            .map(|(&id, &mode)| (id, mode))
+            .collect()
     }
 
     pub fn get_waiters(&self) -> Vec<u64> {
@@ -224,9 +224,9 @@ impl LockEntry {
         txn_id: u64,
         mode: LockMode,
     ) -> bool {
-        holders.iter().all(|(&id, held_mode)| {
-            id == txn_id || mode.is_compatible(held_mode)
-        })
+        holders
+            .iter()
+            .all(|(&id, held_mode)| id == txn_id || mode.is_compatible(held_mode))
     }
 
     fn remove_from_queue(&self, txn_id: u64) {
