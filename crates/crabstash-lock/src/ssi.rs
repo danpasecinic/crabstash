@@ -420,6 +420,7 @@ impl SSIManager {
 
         let read_set = rw_set.read_set().clone();
         let write_set = rw_set.write_set().clone();
+        let had_writes = !write_set.is_empty();
         drop(rw_set);
 
         let start_ts = self
@@ -448,6 +449,11 @@ impl SSIManager {
 
         self.active_txns.remove(&txn_id);
         self.active_start_ts.remove(&txn_id);
+
+        if had_writes {
+            self.active_writers.fetch_sub(1, Ordering::Release);
+        }
+
         self.update_safe_snapshot();
         self.stats.commits.fetch_add(1, Ordering::Relaxed);
         debug!(txn_id, commit_ts, "SSI: transaction committed");
@@ -456,10 +462,48 @@ impl SSIManager {
     }
 
     pub fn abort_txn(&self, txn_id: u64) {
-        self.active_txns.remove(&txn_id);
+        if let Some((_, rw_set)) = self.active_txns.remove(&txn_id) {
+            let guard = rw_set.lock();
+            if !guard.write_keys.is_empty() {
+                self.active_writers.fetch_sub(1, Ordering::Release);
+            }
+        }
         self.active_start_ts.remove(&txn_id);
+        self.read_only_txns.remove(&txn_id);
         self.update_safe_snapshot();
         debug!(txn_id, "SSI: transaction aborted");
+    }
+
+    pub fn commit_read_only_txn(&self, txn_id: u64) {
+        self.active_start_ts.remove(&txn_id);
+        self.read_only_txns.remove(&txn_id);
+        self.update_safe_snapshot();
+        self.stats.commits.fetch_add(1, Ordering::Relaxed);
+        debug!(txn_id, "SSI: read-only transaction committed");
+    }
+
+    pub fn may_have_write_conflict(&self, read_keys: &HashSet<u64>) -> bool {
+        for &key_hash in read_keys {
+            if self.write_bloom.may_contain(key_hash) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn wait_for_safe_snapshot(&self, timeout_ms: u64) -> Option<u64> {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+        while Instant::now() < deadline {
+            if !self.has_active_writers() {
+                return Some(self.safe_snapshot.load(Ordering::Acquire));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        None
     }
 
     pub fn advance_watermark(&self, new_watermark: u64) {
