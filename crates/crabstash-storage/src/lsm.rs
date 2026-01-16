@@ -226,12 +226,9 @@ impl Lsm {
             }
         }
 
-        drop(inner);
-
         for level in 0..7 {
-            let mut inner = self.inner.write();
-            if let Some(ssts) = inner.levels.get_mut(&level) {
-                for sst in ssts.iter_mut().rev() {
+            if let Some(ssts) = inner.levels.get(&level) {
+                for sst in ssts.iter().rev() {
                     if let Some(value) = sst.get(key)? {
                         debug!(level, "found in SSTable");
                         return Ok(Some(value));
