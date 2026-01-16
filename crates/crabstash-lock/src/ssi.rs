@@ -252,7 +252,9 @@ impl SSIManager {
         for (&ts, committed_txn) in committed.iter() {
             if ts > read_ts && ts < commit_ts {
                 if rw_set.has_read_write_overlap(&committed_txn.write_set) {
-                    self.stats.conflicts_detected.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .conflicts_detected
+                        .fetch_add(1, Ordering::Relaxed);
                     rw_set.add_inbound_conflict(RWConflict {
                         from_txn: ts,
                         to_txn: txn_id,
@@ -261,7 +263,9 @@ impl SSIManager {
                 }
 
                 if rw_set.has_write_read_overlap(&committed_txn.read_set) {
-                    self.stats.conflicts_detected.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .conflicts_detected
+                        .fetch_add(1, Ordering::Relaxed);
                     rw_set.add_outbound_conflict(RWConflict {
                         from_txn: txn_id,
                         to_txn: ts,
@@ -310,10 +314,7 @@ impl SSIManager {
 
         if rw_set.has_inbound_conflict() {
             let conflicting_ts = rw_set.inbound_conflicts.first().unwrap().from_txn;
-            warn!(
-                txn_id,
-                conflicting_ts, "SSI: write skew detected, aborting"
-            );
+            warn!(txn_id, conflicting_ts, "SSI: write skew detected, aborting");
             self.stats.aborts_write_skew.fetch_add(1, Ordering::Relaxed);
             return Err(SSIConflict::WriteSkew { conflicting_ts });
         }

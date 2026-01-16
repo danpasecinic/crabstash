@@ -15,6 +15,7 @@ pub enum Error {
     LockConflict,
     WriteSkew,
     PhantomRead,
+    SerializableConflict,
 }
 
 impl fmt::Display for Error {
@@ -31,6 +32,9 @@ impl fmt::Display for Error {
             Error::LockConflict => write!(f, "Lock conflict"),
             Error::WriteSkew => write!(f, "Write skew detected (serializable violation)"),
             Error::PhantomRead => write!(f, "Phantom read detected (serializable violation)"),
+            Error::SerializableConflict => {
+                write!(f, "Serializable conflict (dangerous structure detected)")
+            }
         }
     }
 }

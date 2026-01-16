@@ -210,6 +210,7 @@ fn ssi_error_to_common(err: SSIConflict) -> Error {
     match err {
         SSIConflict::WriteSkew { .. } => Error::WriteSkew,
         SSIConflict::Phantom { .. } => Error::PhantomRead,
+        SSIConflict::DangerousStructure { .. } => Error::SerializableConflict,
         SSIConflict::TxnNotFound => Error::TransactionAborted,
     }
 }
