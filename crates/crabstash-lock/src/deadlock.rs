@@ -38,11 +38,14 @@ impl WaitForGraph {
     }
 
     pub fn register_txn(&mut self, txn_id: u64, start_ts: u64, priority: u32) {
-        self.txn_info.insert(txn_id, TxnInfo {
-            start_ts,
-            lock_count: 0,
-            priority,
-        });
+        self.txn_info.insert(
+            txn_id,
+            TxnInfo {
+                start_ts,
+                lock_count: 0,
+                priority,
+            },
+        );
     }
 
     pub fn unregister_txn(&mut self, txn_id: u64) {
@@ -192,7 +195,7 @@ impl Default for WaitForGraph {
 
 pub struct DeadlockDetector {
     graph: std::sync::Arc<Mutex<WaitForGraph>>,
-    shutdown: AtomicBool,
+    shutdown: std::sync::Arc<AtomicBool>,
     check_interval: Duration,
     abort_sender: Mutex<Option<mpsc::Sender<u64>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
@@ -207,7 +210,7 @@ impl DeadlockDetector {
         (
             Self {
                 graph,
-                shutdown: AtomicBool::new(false),
+                shutdown: std::sync::Arc::new(AtomicBool::new(false)),
                 check_interval,
                 abort_sender: Mutex::new(Some(tx)),
                 handle: Mutex::new(None),
@@ -220,13 +223,9 @@ impl DeadlockDetector {
         let graph = self.graph.clone();
         let interval = self.check_interval;
         let sender = self.abort_sender.lock().clone();
-
-        let shutdown = &self.shutdown as *const AtomicBool;
-        let shutdown_ptr = shutdown as usize;
+        let shutdown = self.shutdown.clone();
 
         let handle = thread::spawn(move || {
-            let shutdown = unsafe { &*(shutdown_ptr as *const AtomicBool) };
-
             while !shutdown.load(Ordering::Relaxed) {
                 thread::sleep(interval);
 
