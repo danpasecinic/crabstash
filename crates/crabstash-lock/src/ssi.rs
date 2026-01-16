@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -12,6 +12,63 @@ use tracing::{debug, info, warn};
 #[inline]
 fn hash_key(key: &[u8]) -> u64 {
     rapidhash(key)
+}
+
+const BLOOM_SIZE_BITS: usize = 8192;
+const BLOOM_NUM_HASHES: usize = 3;
+
+pub struct BloomFilter {
+    bits: Vec<AtomicU64>,
+}
+
+impl BloomFilter {
+    pub fn new() -> Self {
+        let num_words = (BLOOM_SIZE_BITS + 63) / 64;
+        let bits = (0..num_words).map(|_| AtomicU64::new(0)).collect();
+        Self { bits }
+    }
+
+    fn get_bit_indices(hash: u64) -> [usize; BLOOM_NUM_HASHES] {
+        let h1 = hash as usize;
+        let h2 = (hash >> 16) as usize;
+        let h3 = (hash >> 32) as usize;
+        [
+            h1 % BLOOM_SIZE_BITS,
+            (h1.wrapping_add(h2)) % BLOOM_SIZE_BITS,
+            (h1.wrapping_add(h2).wrapping_add(h3)) % BLOOM_SIZE_BITS,
+        ]
+    }
+
+    pub fn insert(&self, hash: u64) {
+        for idx in Self::get_bit_indices(hash) {
+            let word_idx = idx / 64;
+            let bit_idx = idx % 64;
+            self.bits[word_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
+        }
+    }
+
+    pub fn may_contain(&self, hash: u64) -> bool {
+        for idx in Self::get_bit_indices(hash) {
+            let word_idx = idx / 64;
+            let bit_idx = idx % 64;
+            if self.bits[word_idx].load(Ordering::Relaxed) & (1 << bit_idx) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn clear(&self) {
+        for word in &self.bits {
+            word.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Default for BloomFilter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +234,9 @@ pub struct SSIManager {
     committed_txns: RwLock<HashMap<u64, CommittedTxn>>,
     active_txns: DashMap<u64, Arc<Mutex<ReadWriteSet>>>,
     active_start_ts: DashMap<u64, u64>,
+    read_only_txns: DashMap<u64, bool>,
+    active_writers: AtomicUsize,
+    write_bloom: BloomFilter,
     commit_lock: Mutex<()>,
     watermark: RwLock<u64>,
     safe_snapshot: AtomicU64,
@@ -192,6 +252,9 @@ impl SSIManager {
             committed_txns: RwLock::new(HashMap::new()),
             active_txns: DashMap::new(),
             active_start_ts: DashMap::new(),
+            read_only_txns: DashMap::new(),
+            active_writers: AtomicUsize::new(0),
+            write_bloom: BloomFilter::new(),
             commit_lock: Mutex::new(()),
             watermark: RwLock::new(0),
             safe_snapshot: AtomicU64::new(0),
@@ -202,6 +265,25 @@ impl SSIManager {
 
     pub fn begin_txn(&self, txn_id: u64) -> Arc<Mutex<ReadWriteSet>> {
         self.begin_txn_with_ts(txn_id, txn_id)
+    }
+
+    pub fn begin_read_only_txn(&self, txn_id: u64, start_ts: u64) {
+        self.active_start_ts.insert(txn_id, start_ts);
+        self.read_only_txns.insert(txn_id, true);
+        self.update_safe_snapshot();
+        debug!(txn_id, start_ts, "SSI: read-only transaction started");
+    }
+
+    pub fn is_read_only(&self, txn_id: u64) -> bool {
+        self.read_only_txns.contains_key(&txn_id)
+    }
+
+    pub fn active_writer_count(&self) -> usize {
+        self.active_writers.load(Ordering::Acquire)
+    }
+
+    pub fn has_active_writers(&self) -> bool {
+        self.active_writer_count() > 0
     }
 
     pub fn begin_txn_with_ts(&self, txn_id: u64, start_ts: u64) -> Arc<Mutex<ReadWriteSet>> {
@@ -221,7 +303,16 @@ impl SSIManager {
 
     pub fn record_write(&self, txn_id: u64, key: &[u8]) {
         if let Some(rw_set) = self.active_txns.get(&txn_id) {
-            rw_set.lock().record_write(key);
+            let mut guard = rw_set.lock();
+            let was_empty = guard.write_keys.is_empty();
+            guard.record_write(key);
+
+            if was_empty {
+                self.active_writers.fetch_add(1, Ordering::Release);
+            }
+
+            let hash = hash_key(key);
+            self.write_bloom.insert(hash);
         }
     }
 
