@@ -58,13 +58,13 @@ impl ReadWriteSet {
         self.read_ranges.iter().any(|(start, end)| {
             let after_start = match start {
                 Bound::Unbounded => true,
-                Bound::Included(s) => &key_bytes >= s,
-                Bound::Excluded(s) => &key_bytes > s,
+                Bound::Included(s) => key_bytes >= *s,
+                Bound::Excluded(s) => key_bytes > *s,
             };
             let before_end = match end {
                 Bound::Unbounded => true,
-                Bound::Included(e) => &key_bytes <= e,
-                Bound::Excluded(e) => &key_bytes < e,
+                Bound::Included(e) => key_bytes <= *e,
+                Bound::Excluded(e) => key_bytes < *e,
             };
             after_start && before_end
         })
