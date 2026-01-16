@@ -84,7 +84,14 @@ impl ReadWriteSet {
     }
 
     pub fn has_dangerous_structure(&self) -> bool {
-        self.has_inbound_conflict() && self.has_outbound_conflict()
+        if !self.has_inbound_conflict() || !self.has_outbound_conflict() {
+            return false;
+        }
+
+        let inbound_txns: HashSet<_> = self.inbound_conflicts.iter().map(|c| c.from_txn).collect();
+        let outbound_txns: HashSet<_> = self.outbound_conflicts.iter().map(|c| c.to_txn).collect();
+
+        inbound_txns.is_disjoint(&outbound_txns)
     }
 
     pub fn has_read_write_overlap(&self, other_writes: &HashSet<u64>) -> bool {
