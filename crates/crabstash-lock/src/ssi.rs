@@ -194,8 +194,15 @@ struct CommittedTxn {
     #[allow(dead_code)]
     start_ts: u64,
     read_set: HashSet<u64>,
+    #[allow(dead_code)]
     write_set: HashSet<u64>,
     write_keys: Vec<Bytes>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WriteIndexEntry {
+    commit_ts: u64,
+    start_ts: u64,
 }
 
 #[derive(Debug, Default)]
@@ -239,6 +246,7 @@ pub struct SSIManager {
     read_only_txns: DashMap<u64, bool>,
     active_writers: AtomicUsize,
     write_bloom: BloomFilter,
+    write_index: DashMap<u64, Vec<WriteIndexEntry>>,
     commit_lock: Mutex<()>,
     watermark: RwLock<u64>,
     safe_snapshot: AtomicU64,
@@ -257,6 +265,7 @@ impl SSIManager {
             read_only_txns: DashMap::new(),
             active_writers: AtomicUsize::new(0),
             write_bloom: BloomFilter::new(),
+            write_index: DashMap::new(),
             commit_lock: Mutex::new(()),
             watermark: RwLock::new(0),
             safe_snapshot: AtomicU64::new(0),
@@ -349,20 +358,30 @@ impl SSIManager {
             .ok_or(SSIConflict::TxnNotFound)?;
         let mut rw_set = rw_set_arc.lock();
 
+        let mut inbound_conflicts = Vec::new();
+        for &read_key_hash in rw_set.read_set() {
+            if let Some(writers) = self.write_index.get(&read_key_hash) {
+                for entry in writers.iter() {
+                    if entry.commit_ts > read_ts && entry.start_ts < commit_ts {
+                        self.stats
+                            .conflicts_detected
+                            .fetch_add(1, Ordering::Relaxed);
+                        inbound_conflicts.push(RWConflict {
+                            from_txn: entry.commit_ts,
+                            to_txn: txn_id,
+                            conflict_type: ConflictType::ReadWrite,
+                        });
+                    }
+                }
+            }
+        }
+        for conflict in inbound_conflicts {
+            rw_set.add_inbound_conflict(conflict);
+        }
+
         let committed = self.committed_txns.read();
         for (&ts, committed_txn) in committed.iter() {
             if ts > read_ts && ts < commit_ts {
-                if rw_set.has_read_write_overlap(&committed_txn.write_set) {
-                    self.stats
-                        .conflicts_detected
-                        .fetch_add(1, Ordering::Relaxed);
-                    rw_set.add_inbound_conflict(RWConflict {
-                        from_txn: ts,
-                        to_txn: txn_id,
-                        conflict_type: ConflictType::ReadWrite,
-                    });
-                }
-
                 if rw_set.has_write_read_overlap(&committed_txn.read_set) {
                     self.stats
                         .conflicts_detected
@@ -430,6 +449,17 @@ impl SSIManager {
             .get(&txn_id)
             .map(|r| *r)
             .unwrap_or(read_ts);
+
+        let index_entry = WriteIndexEntry {
+            commit_ts,
+            start_ts,
+        };
+        for &write_key_hash in &write_set {
+            self.write_index
+                .entry(write_key_hash)
+                .or_default()
+                .push(index_entry);
+        }
 
         self.committed_txns.write().insert(
             commit_ts,
@@ -523,6 +553,12 @@ impl SSIManager {
                     pruned, "SSI: advanced watermark, pruned old txns"
                 );
             }
+            drop(committed);
+
+            self.write_index.retain(|_, entries| {
+                entries.retain(|e| e.commit_ts >= new_watermark);
+                !entries.is_empty()
+            });
         }
     }
 
