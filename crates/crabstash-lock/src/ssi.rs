@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use rapidhash::rapidhash;
+use rapidhash::v3::{RapidSecrets, rapidhash_v3_seeded};
 use tracing::{debug, info, warn};
+
+const HASH_SECRETS: RapidSecrets = RapidSecrets::seed(0);
 
 #[inline]
 fn hash_key(key: &[u8]) -> u64 {
-    rapidhash(key)
+    rapidhash_v3_seeded(key, &HASH_SECRETS)
 }
 
 const BLOOM_SIZE_BITS: usize = 8192;
