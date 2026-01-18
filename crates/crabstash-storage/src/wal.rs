@@ -550,10 +550,8 @@ impl WalManager {
             let src_path = Self::segment_path(&self.wal_dir, segment_id);
             if src_path.exists() {
                 let dst_path = archive_dir.join(format!(
-                    "{}{}{}",
-                    WAL_SEGMENT_PREFIX,
-                    format!("{:08}", segment_id),
-                    WAL_SEGMENT_EXT
+                    "{}{:08}{}",
+                    WAL_SEGMENT_PREFIX, segment_id, WAL_SEGMENT_EXT
                 ));
                 fs::rename(&src_path, &dst_path)?;
             }
