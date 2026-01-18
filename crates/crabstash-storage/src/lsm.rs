@@ -277,7 +277,7 @@ impl Lsm {
         let key = key.into();
         let ts = self.next_ts.fetch_add(1, Ordering::Relaxed);
 
-        let mut inner = self.inner.write();
+        let inner = self.inner.write();
 
         let record = WalRecord {
             record_type: RecordType::Delete,
@@ -398,7 +398,7 @@ impl Lsm {
     }
 
     pub fn sync(&self) -> Result<()> {
-        let mut inner = self.inner.write();
+        let inner = self.inner.write();
         inner.wal.sync()?;
         Ok(())
     }
