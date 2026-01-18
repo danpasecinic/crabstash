@@ -17,4 +17,4 @@ pub use iterator::{
 pub use lsm::{CacheStats, Lsm, LsmIterator, LsmOptions, SnapshotLsmIterator};
 pub use memtable::{MemTable, MemTableIterator};
 pub use sstable::{CompressionType, SSTable, SSTableBuilder, SSTableIterator};
-pub use wal::Wal;
+pub use wal::{RecordType, SyncMode, Wal, WalManager, WalManagerOptions, WalOptions, WalRecord};
